@@ -115,7 +115,7 @@ jobs:
           config: |
             matrix:
               arch: [manylinux2014-x64]
-              py2: ["311"]
+              py2: ["310"]
             operations: []
 
     outputs:
