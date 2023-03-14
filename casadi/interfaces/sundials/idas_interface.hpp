@@ -57,11 +57,17 @@ namespace casadi {
     /// Function object
     const IdasInterface& self;
 
-    // Idas memory block
+    /// Idas memory block
     void* mem;
 
-    // Ids of backward problem
+    /// Ids of backward problem
     int whichB;
+
+    /// Jacobian memory blocks, forward problem
+    double *jac_ode_x, *jac_alg_x, *jac_ode_z, *jac_alg_z;
+
+    /// Jacobian memory blocks, backward problem
+    double *jac_rode_rx, *jac_ralg_rx, *jac_rode_rz, *jac_ralg_rz;
 
     /// Constructor
     IdasMemory(const IdasInterface& s);
@@ -110,8 +116,9 @@ namespace casadi {
     /** \brief  Initialize */
     void init(const Dict& opts) override;
 
-    /** \brief Initialize the taping */
-    void initTaping(IdasMemory* m) const;
+    /** \brief Set the (persistent) work vectors */
+    void set_work(void* mem, const double**& arg, double**& res,
+      casadi_int*& iw, double*& w) const override;
 
     /** \brief Create memory block */
     void* alloc_mem() const override { return new IdasMemory(*this);}
@@ -123,15 +130,15 @@ namespace casadi {
     void free_mem(void *mem) const override { delete static_cast<IdasMemory*>(mem);}
 
     /** \brief  Reset the forward problem and bring the time back to t0 */
-    void reset(IntegratorMemory* mem, double t,
+    void reset(IntegratorMemory* mem,
       const double* x, const double* z, const double* p) const override;
 
     /** \brief  Advance solution in time */
-    void advance(IntegratorMemory* mem, double t_next, double t_stop,
+    void advance(IntegratorMemory* mem,
       const double* u, double* x, double* z, double* q) const override;
 
     /** \brief  Reset the backward problem and take time to tf */
-    void resetB(IntegratorMemory* mem, double t,
+    void resetB(IntegratorMemory* mem,
       const double* rx, const double* rz, const double* rp) const override;
 
     /** \brief Introduce an impulse into the backwards integration at the current time */
@@ -139,8 +146,8 @@ namespace casadi {
       const double* rx, const double* rz, const double* rp) const override;
 
     /** \brief  Retreat solution in time */
-    void retreat(IntegratorMemory* mem, double t_next, double t_stop,
-      double* rx, double* rz, double* rq) const override;
+    void retreat(IntegratorMemory* mem, const double* u,
+      double* rx, double* rz, double* rq, double* uq) const override;
 
     /** \brief Cast to memory object */
     static IdasMemory* to_mem(void *mem) {
@@ -149,11 +156,11 @@ namespace casadi {
       return m;
     }
 
-    ///@{
-    // Get system Jacobian
-    Function getJ(bool backward) const override;
-    template<typename MatType> Function getJ(bool backward) const;
-    ///@}
+    // Get system Jacobian, forward problem
+    Function get_jacF(Sparsity* sp) const override;
+
+    // Get system Jacobian, backward problem
+    Function get_jacB(Sparsity* sp) const override;
 
     /// A documentation string
     static const std::string meta_doc;
@@ -173,8 +180,8 @@ namespace casadi {
                        N_Vector resvalB, N_Vector vB, N_Vector JvB, double cjB,
                        void *user_data, N_Vector tmp1B, N_Vector tmp2B);
     static int rhsQ(double t, N_Vector xz, N_Vector xzdot, N_Vector qdot, void *user_data);
-    static int rhsQB(double t, N_Vector xz, N_Vector xzdot, N_Vector xzB, N_Vector xzdotB,
-                     N_Vector qdotA, void *user_data);
+    static int rhsQB(double t, N_Vector xz, N_Vector xzdot, N_Vector rxz,
+      N_Vector rxzdot, N_Vector ruqdot, void *user_data);
     static int psolve(double t, N_Vector xz, N_Vector xzdot, N_Vector rr, N_Vector rvec,
                       N_Vector zvec, double cj, double delta, void *user_data,
                       N_Vector tmp);

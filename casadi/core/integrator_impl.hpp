@@ -39,6 +39,14 @@ namespace casadi {
 
     \identifier{1lp} */
 struct CASADI_EXPORT IntegratorMemory : public OracleMemory {
+  // Current control interval
+  casadi_int k;
+  // Current time
+  double t;
+  // Next time to be visited by the integrator
+  double t_next;
+  // Next stop time due to step change in input, continuous
+  double t_stop;
 };
 
 /** \brief Internal storage for integrator related data
@@ -111,18 +119,18 @@ Integrator : public OracleFunction, public PluginInterface<Integrator> {
   virtual MX algebraic_state_output(const MX& Z) const { return Z; }
 
   /** \brief Reset the forward problem */
-  virtual void reset(IntegratorMemory* mem, double t,
+  virtual void reset(IntegratorMemory* mem,
     const double* x, const double* z, const double* p) const = 0;
 
   /** \brief  Find next stop time */
   casadi_int next_stop(casadi_int k, const double* u) const;
 
   /** \brief  Advance solution in time */
-  virtual void advance(IntegratorMemory* mem, double t_next, double t_stop,
+  virtual void advance(IntegratorMemory* mem,
     const double* u, double* x, double* z, double* q) const = 0;
 
   /** \brief Reset the backward problem */
-  virtual void resetB(IntegratorMemory* mem, double t,
+  virtual void resetB(IntegratorMemory* mem,
     const double* rx, const double* rz, const double* rp) const = 0;
 
   /** \brief  Find next stop time */
@@ -133,8 +141,8 @@ Integrator : public OracleFunction, public PluginInterface<Integrator> {
     const double* rx, const double* rz, const double* rp) const = 0;
 
   /** \brief  Retreat solution in time */
-  virtual void retreat(IntegratorMemory* mem, double t_next, double t_stop,
-    double* rx, double* rz, double* rq) const = 0;
+  virtual void retreat(IntegratorMemory* mem, const double* u,
+    double* rx, double* rz, double* rq, double* uq) const = 0;
 
   /** \brief  evaluate
 
@@ -314,27 +322,29 @@ Integrator : public OracleFunction, public PluginInterface<Integrator> {
 
 /// Input arguments of a forward stepping function
 enum FStepIn {
-  /// Differential state
+  /// Current time
+  FSTEP_T0,
+  /// Step size
+  FSTEP_H,
+  /// State vector
   FSTEP_X0,
-  /// Algebraic state
-  FSTEP_Z0,
+  /// Dependent variables
+  FSTEP_V0,
   /// Parameter
   FSTEP_P,
   /// Controls
   FSTEP_U,
-  /// Explicit time dependence
-  FSTEP_T,
   /// Number of arguments
   FSTEP_NUM_IN
 };
 
 /// Output arguments of a forward stepping function
 enum FStepOut {
-  /// Differerential state at the end of the interval
+  /// State vector at next time
   FSTEP_XF,
-  /// Residual equations
-  FSTEP_RES,
-  /// Right hand side of quadratures equations
+  /// Dependent variables at next time
+  FSTEP_VF,
+  /// Quadrature state contribution
   FSTEP_QF,
   /// Number of arguments
   FSTEP_NUM_OUT
@@ -342,56 +352,54 @@ enum FStepOut {
 
 /// Input arguments of a backward stepping function
 enum BStepIn {
-  /// Backward differential state
+  /// Current time
+  BSTEP_T0,
+  /// Step size
+  BSTEP_H,
+  /// State vector for backward problem
   BSTEP_RX0,
-  /// Backward algebraic state
-  BSTEP_RZ0,
-  /// Backward  parameter vector
+  /// Dependent variables for backward problem
+  BSTEP_RV0,
+  /// Parameter vector for backward problem
   BSTEP_RP,
-  /// Forward differential state
+  /// State vector for forward problem
   BSTEP_X,
-  /// Forward algebraic state
-  BSTEP_Z,
-  /// Parameter vector
+  /// Dependent variables for forward problem
+  BSTEP_V,
+  /// Parameter vector for forward problem
   BSTEP_P,
   /// Controls
   BSTEP_U,
-  /// Explicit time dependence
-  BSTEP_T,
   /// Number of arguments
   BSTEP_NUM_IN
 };
 
 /// Output arguments of a backward stepping function
 enum BStepOut {
-  /// Right hand side of ODE
+  /// State vector for backward problem at the next time
   BSTEP_RXF,
-  /// Right hand side of algebraic equations
-  BSTEP_RES,
-  /// Right hand side of quadratures
-  BSTEP_QF,
+  /// Dependent variables for backward problem at the next time
+  BSTEP_RVF,
+  /// Quadrature state contribution for backward problem, summing
+  BSTEP_RQF,
+  /// Quadrature state contribution for backward problem, non-summing
+  BSTEP_UQF,
   /// Number of arguments
   BSTEP_NUM_OUT
 };
 
 struct CASADI_EXPORT FixedStepMemory : public IntegratorMemory {
-  // Current time
-  double t;
+  // Work vectors, allocated in base class
+  double *x, *z, *rx, *rz, *rq, *x_prev, *rx_prev;
 
-  // Discrete time
-  casadi_int k;
+  /// Work vectors, forward problem
+  double *v, *p, *u, *q, *v_prev, *q_prev;
 
-  // Current state
-  std::vector<double> x, z, p, u, q, rx, rz, rp, rq, uq;
+  /// Work vectors, backward problem
+  double *rv, *rp, *uq, *rv_prev, *rq_prev, *uq_prev;
 
-  // Previous state
-  std::vector<double> x_prev, Z_prev, q_prev, rx_prev, RZ_prev, rq_prev;
-
-  /// Algebraic variables for the discrete time integration
-  std::vector<double> Z, RZ;
-
-  // Tape
-  std::vector<std::vector<double> > x_tape, Z_tape;
+  /// State and dependent variables at all times
+  double *x_tape, *v_tape;
 };
 
 class CASADI_EXPORT FixedStepIntegrator : public Integrator {
@@ -415,6 +423,10 @@ class CASADI_EXPORT FixedStepIntegrator : public Integrator {
   /// Initialize stage
   void init(const Dict& opts) override;
 
+  /** \brief Set the (persistent) work vectors */
+  void set_work(void* mem, const double**& arg, double**& res,
+    casadi_int*& iw, double*& w) const override;
+
   /** Helper for a more powerful 'integrator' factory */
   Function create_advanced(const Dict& opts) override;
 
@@ -437,15 +449,15 @@ class CASADI_EXPORT FixedStepIntegrator : public Integrator {
   virtual void setupFG() = 0;
 
   /** \brief Reset the forward problem */
-  void reset(IntegratorMemory* mem, double t,
+  void reset(IntegratorMemory* mem,
     const double* x, const double* z, const double* p) const override;
 
   /** \brief  Advance solution in time */
-  void advance(IntegratorMemory* mem, double t_next, double t_stop,
+  void advance(IntegratorMemory* mem,
     const double* u, double* x, double* z, double* q) const override;
 
   /// Reset the backward problem and take time to tf
-  void resetB(IntegratorMemory* mem, double t,
+  void resetB(IntegratorMemory* mem,
     const double* rx, const double* rz, const double* rp) const override;
 
   /// Introduce an impulse into the backwards integration at the current time
@@ -453,8 +465,8 @@ class CASADI_EXPORT FixedStepIntegrator : public Integrator {
     const double* rx, const double* rz, const double* rp) const override;
 
   /** \brief Retreat solution in time */
-  void retreat(IntegratorMemory* mem, double t_next, double t_stop,
-    double* rx, double* rz, double* rq) const override;
+  void retreat(IntegratorMemory* mem, const double* u,
+    double* rx, double* rz, double* rq, double* uq) const override;
 
   /// Get explicit dynamics
   virtual const Function& getExplicit() const { return F_;}
@@ -465,14 +477,14 @@ class CASADI_EXPORT FixedStepIntegrator : public Integrator {
   // Discrete time dynamics
   Function F_, G_;
 
-  // Number of finite elements
-  casadi_int nk_;
+  // Target number of finite elements
+  casadi_int nk_target_;
 
-  // Time step size
-  double h_;
+  // Number of steps per control interval
+  std::vector<casadi_int> disc_;
 
-  /// Number of algebraic variables for the discrete time integration
-  casadi_int nZ_, nRZ_;
+  /// Number of dependent variables in the discrete time integration
+  casadi_int nv_, nrv_;
 
   /** \brief Serialize an object without type information
 

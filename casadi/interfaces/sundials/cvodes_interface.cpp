@@ -99,7 +99,7 @@ void CvodesInterface::init(const Dict& opts) {
   create_function("odeF", {"x", "p", "u", "t"}, {"ode"});
   create_function("quadF", {"x", "p", "u", "t"}, {"quad"});
   create_function("odeB", {"rx", "rp", "x", "p", "u", "t"}, {"rode"});
-  create_function("quadB", {"rx", "rp", "x", "p", "u", "t"}, {"rquad"});
+  create_function("quadB", {"rx", "rp", "x", "p", "u", "t"}, {"rquad", "uquad"});
 
   // Algebraic variables not supported
   casadi_assert(nz_==0 && nrz_==0,
@@ -129,6 +129,10 @@ void CvodesInterface::init(const Dict& opts) {
                       {"t", "x", "p", "u", "rx", "rp", "fwd:rx"}, {"fwd:rode"});
     }
   }
+
+  // Misc
+  alloc_w(nx_); // casadi_project
+  alloc_w(nrx_); // casadi_project
 }
 
 int CvodesInterface::init_mem(void* mem) const {
@@ -236,30 +240,30 @@ int CvodesInterface::rhs(double t, N_Vector x, N_Vector xdot, void *user_data) {
   }
 }
 
-void CvodesInterface::reset(IntegratorMemory* mem, double t, const double* x,
-                            const double* z, const double* _p) const {
+void CvodesInterface::reset(IntegratorMemory* mem,
+    const double* x, const double* z, const double* _p) const {
   if (verbose_) casadi_message(name_ + "::reset");
   auto m = to_mem(mem);
 
   // Reset the base classes
-  SundialsInterface::reset(mem, t, x, z, _p);
+  SundialsInterface::reset(mem, x, z, _p);
 
   // Re-initialize
-  THROWING(CVodeReInit, m->mem, t, m->xz);
+  THROWING(CVodeReInit, m->mem, m->t, m->xz);
 
   // Re-initialize quadratures
-  if (nq_>0) {
+  if (nq_ > 0) {
     N_VConst(0.0, m->q);
     THROWING(CVodeQuadReInit, m->mem, m->q);
   }
 
   // Re-initialize backward integration
-  if (nrx_>0) {
+  if (nrx_ > 0) {
     THROWING(CVodeAdjReInit, m->mem);
   }
 }
 
-void CvodesInterface::advance(IntegratorMemory* mem, double t_next, double t_stop,
+void CvodesInterface::advance(IntegratorMemory* mem,
     const double* u, double* x, double* z, double* q) const {
   auto m = to_mem(mem);
 
@@ -267,23 +271,23 @@ void CvodesInterface::advance(IntegratorMemory* mem, double t_next, double t_sto
   casadi_copy(u, nu_, m->u);
 
   // Do not integrate past change in input signals or past the end
-  THROWING(CVodeSetStopTime, m->mem, t_stop);
+  THROWING(CVodeSetStopTime, m->mem, m->t_stop);
 
   // Integrate, unless already at desired time
   const double ttol = 1e-9;
-  if (fabs(m->t - t_next)>=ttol) {
+  if (fabs(m->t - m->t_next) >= ttol) {
     // Integrate forward ...
+    double tret = m->t;
     if (nrx_>0) {
       // ... with taping
-      THROWING(CVodeF, m->mem, t_next, m->xz, &m->t, CV_NORMAL, &m->ncheck);
+      THROWING(CVodeF, m->mem, m->t_next, m->xz, &tret, CV_NORMAL, &m->ncheck);
     } else {
       // ... without taping
-      THROWING(CVode, m->mem, t_next, m->xz, &m->t, CV_NORMAL);
+      THROWING(CVode, m->mem, m->t_next, m->xz, &tret, CV_NORMAL);
     }
 
     // Get quadratures
     if (nq_ > 0) {
-      double tret;
       THROWING(CVodeGetQuad, m->mem, &tret, m->q);
     }
   }
@@ -299,17 +303,17 @@ void CvodesInterface::advance(IntegratorMemory* mem, double t_next, double t_sto
   THROWING(CVodeGetNonlinSolvStats, m->mem, &m->nniters, &m->nncfails);
 }
 
-void CvodesInterface::resetB(IntegratorMemory* mem, double t, const double* rx,
-    const double* rz, const double* rp) const {
+void CvodesInterface::resetB(IntegratorMemory* mem,
+    const double* rx, const double* rz, const double* rp) const {
   auto m = to_mem(mem);
 
   // Reset the base classes
-  SundialsInterface::resetB(mem, t, rx, rz, rp);
+  SundialsInterface::resetB(mem, rx, rz, rp);
 
   if (m->first_callB) {
     // Create backward problem
     THROWING(CVodeCreateB, m->mem, lmm_, iter_, &m->whichB);
-    THROWING(CVodeInitB, m->mem, m->whichB, rhsB, t, m->rxz);
+    THROWING(CVodeInitB, m->mem, m->whichB, rhsB, m->t, m->rxz);
     THROWING(CVodeSStolerancesB, m->mem, m->whichB, reltol_, abstol_);
     THROWING(CVodeSetUserDataB, m->mem, m->whichB, m);
     if (newton_scheme_==SD_DIRECT) {
@@ -317,7 +321,7 @@ void CvodesInterface::resetB(IntegratorMemory* mem, double t, const double* rx,
       CVodeMem cv_mem = static_cast<CVodeMem>(m->mem);
       CVadjMem ca_mem = cv_mem->cv_adj_mem;
       CVodeBMem cvB_mem = ca_mem->cvB_mem;
-      cvB_mem->cv_lmem   = m;
+      cvB_mem->cv_lmem = m;
       cvB_mem->cv_mem->cv_lmem = m;
       cvB_mem->cv_mem->cv_lsetup = lsetupB;
       cvB_mem->cv_mem->cv_lsolve = lsolveB;
@@ -336,7 +340,7 @@ void CvodesInterface::resetB(IntegratorMemory* mem, double t, const double* rx,
     }
 
     // Quadratures for the backward problem
-    THROWING(CVodeQuadInitB, m->mem, m->whichB, rhsQB, m->rq);
+    THROWING(CVodeQuadInitB, m->mem, m->whichB, rhsQB, m->ruq);
     if (quad_err_con_) {
       THROWING(CVodeSetQuadErrConB, m->mem, m->whichB, true);
       THROWING(CVodeQuadSStolerancesB, m->mem, m->whichB, reltol_, abstol_);
@@ -345,8 +349,8 @@ void CvodesInterface::resetB(IntegratorMemory* mem, double t, const double* rx,
     // Mark initialized
     m->first_callB = false;
   } else {
-    THROWING(CVodeReInitB, m->mem, m->whichB, t, m->rxz);
-    THROWING(CVodeQuadReInitB, m->mem, m->whichB, m->rq);
+    THROWING(CVodeReInitB, m->mem, m->whichB, m->t, m->rxz);
+    THROWING(CVodeQuadReInitB, m->mem, m->whichB, m->ruq);
   }
 }
 
@@ -359,24 +363,30 @@ void CvodesInterface::impulseB(IntegratorMemory* mem,
 
   // Reinitialize solver
   THROWING(CVodeReInitB, m->mem, m->whichB, m->t, m->rxz);
-  THROWING(CVodeQuadReInitB, m->mem, m->whichB, m->rq);
+  THROWING(CVodeQuadReInitB, m->mem, m->whichB, m->ruq);
 }
 
-void CvodesInterface::retreat(IntegratorMemory* mem, double t_next, double t_stop,
-    double* rx, double* rz, double* rq) const {
+void CvodesInterface::retreat(IntegratorMemory* mem, const double* u,
+    double* rx, double* rz, double* rq, double* uq) const {
   auto m = to_mem(mem);
+
+  // Set controls
+  casadi_copy(u, nu_, m->u);
+
   // Integrate, unless already at desired time
-  if (t_next < m->t) {
-    THROWING(CVodeB, m->mem, t_next, CV_NORMAL);
-    THROWING(CVodeGetB, m->mem, m->whichB, &m->t, m->rxz);
-    if (nrq_>0) {
-      THROWING(CVodeGetQuadB, m->mem, m->whichB, &m->t, m->rq);
+  if (m->t_next < m->t) {
+    THROWING(CVodeB, m->mem, m->t_next, CV_NORMAL);
+    double tret;
+    THROWING(CVodeGetB, m->mem, m->whichB, &tret, m->rxz);
+    if (nrq_ > 0 || nuq_ > 0) {
+      THROWING(CVodeGetQuadB, m->mem, m->whichB, &tret, m->ruq);
     }
   }
 
   // Save outputs
   casadi_copy(NV_DATA_S(m->rxz), nrx_, rx);
-  casadi_copy(NV_DATA_S(m->rq), nrq_, rq);
+  casadi_copy(NV_DATA_S(m->ruq), nrq_, rq);
+  casadi_copy(NV_DATA_S(m->ruq) + nrq_, nuq_, uq);
 
   // Get stats
   CVodeMem cv_mem = static_cast<CVodeMem>(m->mem);
@@ -400,7 +410,7 @@ void CvodesInterface::cvodes_error(const char* module, int flag) {
 }
 
 void CvodesInterface::ehfun(int error_code, const char *module, const char *function,
-                            char *msg, void *user_data) {
+    char *msg, void *user_data) {
   try {
     casadi_assert_dev(user_data);
     auto m = to_mem(user_data);
@@ -432,8 +442,7 @@ int CvodesInterface::rhsQ(double t, N_Vector x, N_Vector qdot, void *user_data) 
   }
 }
 
-int CvodesInterface::rhsB(double t, N_Vector x, N_Vector rx, N_Vector rxdot,
-                          void *user_data) {
+int CvodesInterface::rhsB(double t, N_Vector x, N_Vector rx, N_Vector rxdot, void *user_data) {
   try {
     casadi_assert_dev(user_data);
     auto m = to_mem(user_data);
@@ -459,8 +468,7 @@ int CvodesInterface::rhsB(double t, N_Vector x, N_Vector rx, N_Vector rxdot,
   }
 }
 
-int CvodesInterface::rhsQB(double t, N_Vector x, N_Vector rx,
-                            N_Vector rqdot, void *user_data) {
+int CvodesInterface::rhsQB(double t, N_Vector x, N_Vector rx, N_Vector ruqdot, void *user_data) {
   try {
     casadi_assert_dev(user_data);
     auto m = to_mem(user_data);
@@ -471,11 +479,12 @@ int CvodesInterface::rhsQB(double t, N_Vector x, N_Vector rx,
     m->arg[3] = m->p;
     m->arg[4] = m->u;
     m->arg[5] = &t;
-    m->res[0] = NV_DATA_S(rqdot);
+    m->res[0] = NV_DATA_S(ruqdot);
+    m->res[1] = NV_DATA_S(ruqdot) + s.nrq_;
     s.calc_function(m, "quadB");
 
     // Negate (note definition of g)
-    casadi_scal(s.nrq_, -1., NV_DATA_S(rqdot));
+    casadi_scal(s.nrq_ + s.nuq_, -1., NV_DATA_S(ruqdot));
 
     return 0;
   } catch(int flag) { // recoverable error
@@ -487,7 +496,7 @@ int CvodesInterface::rhsQB(double t, N_Vector x, N_Vector rx,
 }
 
 int CvodesInterface::jtimes(N_Vector v, N_Vector Jv, double t, N_Vector x,
-                            N_Vector xdot, void *user_data, N_Vector tmp) {
+    N_Vector xdot, void *user_data, N_Vector tmp) {
   try {
     auto m = to_mem(user_data);
     auto& s = m->self;
@@ -508,8 +517,7 @@ int CvodesInterface::jtimes(N_Vector v, N_Vector Jv, double t, N_Vector x,
 }
 
 int CvodesInterface::jtimesB(N_Vector v, N_Vector Jv, double t, N_Vector x,
-                              N_Vector rx, N_Vector rxdot, void *user_data ,
-                              N_Vector tmpB) {
+    N_Vector rx, N_Vector rxdot, void *user_data, N_Vector tmpB) {
   try {
     auto m = to_mem(user_data);
     auto& s = m->self;
@@ -532,8 +540,7 @@ int CvodesInterface::jtimesB(N_Vector v, N_Vector Jv, double t, N_Vector x,
 }
 
 int CvodesInterface::psolve(double t, N_Vector x, N_Vector xdot, N_Vector r,
-                            N_Vector z, double gamma, double delta, int lr,
-                            void *user_data, N_Vector tmp) {
+    N_Vector z, double gamma, double delta, int lr, void *user_data, N_Vector tmp) {
   try {
     auto m = to_mem(user_data);
     auto& s = m->self;
@@ -543,7 +550,7 @@ int CvodesInterface::psolve(double t, N_Vector x, N_Vector xdot, N_Vector r,
     casadi_copy(v, s.nx_, m->v1);
 
     // Solve for undifferentiated right-hand-side, save to output
-    if (s.linsolF_.solve(m->jac, m->v1, 1, false, m->mem_linsolF))
+    if (s.linsolF_.solve(m->jacF, m->v1, 1, false, m->mem_linsolF))
       casadi_error("Linear system solve failed");
     v = NV_DATA_S(z); // possibly different from r
     casadi_copy(m->v1, s.nx1_, v);
@@ -567,7 +574,7 @@ int CvodesInterface::psolve(double t, N_Vector x, N_Vector xdot, N_Vector r,
       }
 
       // Solve for sensitivity right-hand-sides
-      if (s.linsolF_.solve(m->jac, m->v1 + s.nx1_, s.ns_, false, m->mem_linsolF))
+      if (s.linsolF_.solve(m->jacF, m->v1 + s.nx1_, s.ns_, false, m->mem_linsolF))
         casadi_error("Linear solve failed");
 
       // Save to output, reordered
@@ -583,9 +590,8 @@ int CvodesInterface::psolve(double t, N_Vector x, N_Vector xdot, N_Vector r,
   }
 }
 
-int CvodesInterface::psolveB(double t, N_Vector x, N_Vector xB, N_Vector xdotB,
-                              N_Vector rvecB, N_Vector zvecB, double gammaB,
-                              double deltaB, int lr, void *user_data, N_Vector tmpB) {
+int CvodesInterface::psolveB(double t, N_Vector x, N_Vector xB, N_Vector xdotB, N_Vector rvecB,
+    N_Vector zvecB, double gammaB, double deltaB, int lr, void *user_data, N_Vector tmpB) {
   try {
     auto m = to_mem(user_data);
     auto& s = m->self;
@@ -639,29 +645,49 @@ int CvodesInterface::psolveB(double t, N_Vector x, N_Vector xB, N_Vector xdotB,
 }
 
 int CvodesInterface::psetup(double t, N_Vector x, N_Vector xdot, booleantype jok,
-                            booleantype *jcurPtr, double gamma, void *user_data,
-                            N_Vector tmp1, N_Vector tmp2, N_Vector tmp3) {
+    booleantype *jcurPtr, double gamma, void *user_data,
+    N_Vector tmp1, N_Vector tmp2, N_Vector tmp3) {
   try {
     auto m = to_mem(user_data);
     auto& s = m->self;
     // Store gamma for later
     m->gamma = gamma;
 
+    // Sparsity patterns
+    const Sparsity& sp_jac_ode_x = s.get_function("jacF").sparsity_out(0);
+    const Sparsity& sp_jacF = s.linsolF_.sparsity();
+
+    // Offset for storing the sparser Jacobian, to allow overwriting entries
+    casadi_int jac_offset = sp_jacF.nnz() - sp_jac_ode_x.nnz();
+
     // Calculate Jacobian
-    double d1 = -gamma, d2 = 1.;
     m->arg[0] = &t;
     m->arg[1] = NV_DATA_S(x);
     m->arg[2] = m->p;
-    m->arg[3] = &d1;
-    m->arg[4] = &d2;
-    m->res[0] = m->jac;
+    m->arg[3] = m->u;
+    m->res[0] = m->jacF + jac_offset;
     if (s.calc_function(m, "jacF")) casadi_error("'jacF' calculation failed");
+
+    // Project to expected sparsity pattern (with diagonal)
+    casadi_project(m->jacF + jac_offset, sp_jac_ode_x, m->jacF, sp_jacF, m->w);
+
+    // Scale and shift diagonal
+    const casadi_int *colind = sp_jacF.colind(), *row = sp_jacF.row();
+    for (casadi_int c = 0; c < sp_jacF.size2(); ++c) {
+      for (casadi_int k = colind[c]; k < colind[c + 1]; ++k) {
+        casadi_int r = row[k];
+        // Scale Jacobian
+        m->jacF[k] *= -gamma;
+        // Add contribution to diagonal
+        if (r == c) m->jacF[k] += 1;
+      }
+    }
 
     // Jacobian is now current
     *jcurPtr = 1;
 
     // Prepare the solution of the linear system (e.g. factorize)
-    if (s.linsolF_.nfact(m->jac, m->mem_linsolF)) casadi_error("'jacF' factorization failed");
+    if (s.linsolF_.nfact(m->jacF, m->mem_linsolF)) casadi_error("'jacF' factorization failed");
 
     return 0;
   } catch(int flag) { // recoverable error
@@ -673,25 +699,45 @@ int CvodesInterface::psetup(double t, N_Vector x, N_Vector xdot, booleantype jok
 }
 
 int CvodesInterface::psetupB(double t, N_Vector x, N_Vector rx, N_Vector rxdot,
-                              booleantype jokB, booleantype *jcurPtrB, double gammaB,
-                              void *user_data, N_Vector tmp1B, N_Vector tmp2B,
-                              N_Vector tmp3B) {
+    booleantype jokB, booleantype *jcurPtrB, double gammaB,
+    void *user_data, N_Vector tmp1B, N_Vector tmp2B, N_Vector tmp3B) {
   try {
     auto m = to_mem(user_data);
     auto& s = m->self;
     // Store gamma for later
     m->gammaB = gammaB;
+
+    // Sparsity patterns
+    const Sparsity& sp_jac_rode_rx = s.get_function("jacB").sparsity_out(0);
+    const Sparsity& sp_jacB = s.linsolB_.sparsity();
+
+    // Offset for storing the sparser Jacobian, to allow overwriting entries
+    casadi_int jac_offset = sp_jacB.nnz() - sp_jac_rode_rx.nnz();
+
     // Calculate Jacobian
-    double one=1;
     m->arg[0] = &t;
-    m->arg[1] = NV_DATA_S(rx);
-    m->arg[2] = m->rp;
-    m->arg[3] = NV_DATA_S(x);
-    m->arg[4] = m->p;
-    m->arg[5] = &gammaB;
-    m->arg[6] = &one;
-    m->res[0] = m->jacB;
+    m->arg[1] = NV_DATA_S(x);
+    m->arg[2] = m->p;
+    m->arg[3] = m->u;
+    m->arg[4] = NV_DATA_S(rx);
+    m->arg[5] = m->rp;
+    m->res[0] = m->jacB + jac_offset;
     if (s.calc_function(m, "jacB")) casadi_error("'jacB' calculation failed");
+
+    // Project to expected sparsity pattern (with diagonal)
+    casadi_project(m->jacB + jac_offset, sp_jac_rode_rx, m->jacB, sp_jacB, m->w);
+
+    // Scale and shift diagonal
+    const casadi_int *colind = sp_jacB.colind(), *row = sp_jacB.row();
+    for (casadi_int c = 0; c < sp_jacB.size2(); ++c) {
+      for (casadi_int k = colind[c]; k < colind[c + 1]; ++k) {
+        casadi_int r = row[k];
+        // Scale Jacobian
+        m->jacB[k] *= gammaB;
+        // Add contribution to diagonal
+        if (r == c) m->jacB[k] += 1;
+      }
+    }
 
     // Jacobian is now current
     *jcurPtrB = 1;
@@ -844,29 +890,16 @@ int CvodesInterface::lsolveB(CVodeMem cv_mem, N_Vector b, N_Vector weight,
   }
 }
 
-Function CvodesInterface::getJ(bool b) const {
-  return oracle_.is_a("SXFunction") ? getJ<SX>(b) : getJ<MX>(b);
+Function CvodesInterface::get_jacF(Sparsity* sp) const {
+  Function J = oracle_.factory("jacF", {"t", "x", "p", "u"}, {"jac:ode:x"});
+  if (sp) *sp = J.sparsity_out(0) + Sparsity::diag(nx_);
+  return J;
 }
 
-template<typename MatType>
-Function CvodesInterface::getJ(bool backward) const {
-  std::vector<MatType> a = MatType::get_input(oracle_);
-  std::vector<MatType> r = const_cast<Function&>(oracle_)(a); // NOLINT
-  MatType c_x = MatType::sym("c_x");
-  MatType c_xdot = MatType::sym("c_xdot");
-
-  // Get the Jacobian in the Newton iteration
-  if (backward) {
-    MatType jac = c_x*MatType::jacobian(r[DYN_RODE], a[DYN_RX])
-                + c_xdot*MatType::eye(nrx_);
-    return Function("jacB",
-                    {a[DYN_T], a[DYN_RX], a[DYN_RP],
-                      a[DYN_X], a[DYN_P], c_x, c_xdot}, {jac});
-    } else {
-    MatType jac = c_x*MatType::jacobian(r[DYN_ODE], a[DYN_X])
-                + c_xdot*MatType::eye(nx_);
-    return Function("jacF", {a[DYN_T], a[DYN_X], a[DYN_P], c_x, c_xdot}, {jac});
-  }
+Function CvodesInterface::get_jacB(Sparsity* sp) const {
+  Function J = oracle_.factory("jacB", {"t", "x", "p", "u", "rx", "rp"}, {"jac:rode:rx"});
+  if (sp) *sp = J.sparsity_out(0) + Sparsity::diag(nrx_);
+  return J;
 }
 
 CvodesMemory::CvodesMemory(const CvodesInterface& s) : self(s) {

@@ -71,17 +71,17 @@ std::string doc_integrator(const std::string& name) {
 
 Function integrator(const std::string& name, const std::string& solver,
     const SXDict& dae, const Dict& opts) {
-  return integrator(name, solver, dae, 0, {1}, opts);
+  return integrator(name, solver, dae, 0.0, std::vector<double>{1.0}, opts);
 }
 
 Function integrator(const std::string& name, const std::string& solver,
     const MXDict& dae, const Dict& opts) {
-  return integrator(name, solver, dae, 0, {1}, opts);
+  return integrator(name, solver, dae, 0.0, std::vector<double>{1.0}, opts);
 }
 
 Function integrator(const std::string& name, const std::string& solver,
     const Function& dae, const Dict& opts) {
-  return integrator(name, solver, dae, 0, {1}, opts);
+  return integrator(name, solver, dae, 0.0, std::vector<double>{1.0}, opts);
 }
 
 Function integrator(const std::string& name, const std::string& solver,
@@ -292,8 +292,8 @@ Function Integrator::create_advanced(const Dict& opts) {
   return Function::create(this, opts);
 }
 
-int Integrator::
-eval(const double** arg, double** res, casadi_int* iw, double* w, void* mem) const {
+int Integrator::eval(const double** arg, double** res,
+    casadi_int* iw, double* w, void* mem) const {
   auto m = static_cast<IntegratorMemory*>(mem);
 
   // Read inputs
@@ -313,30 +313,34 @@ eval(const double** arg, double** res, casadi_int* iw, double* w, void* mem) con
   double* rx = res[INTEGRATOR_RXF];
   double* rz = res[INTEGRATOR_RZF];
   double* rq = res[INTEGRATOR_RQF];
+  double* uq = res[INTEGRATOR_UQF];
   res += INTEGRATOR_NUM_OUT;
 
   // Setup memory object
   setup(m, arg, res, iw, w);
 
   // Reset solver, take time to t0
-  reset(m, t0_, x0, z0, p);
+  m->t = t0_;
+  reset(m, x0, z0, p);
 
   // Next stop time due to step change in input
   casadi_int k_stop = next_stop(0, u);
 
   // Integrate forward
-  for (casadi_int k = 0; k < nt(); ++k) {
+  for (m->k = 0; m->k < nt(); ++m->k) {
     // Update stopping time, if needed
-    if (k > k_stop) k_stop = next_stop(k, u);
+    if (m->k > k_stop) k_stop = next_stop(m->k, u);
     // Advance solution
-    double t_next = tout_[k], t_stop = tout_[k_stop];
-    if (verbose_) casadi_message("Integrating forward to output time " + str(k) + ": t_next = "
-      + str(t_next) + ", t_stop = " + str(t_stop));
-    advance(m, t_next, t_stop, u, x, z, q);
+    m->t_next = tout_[m->k];
+    m->t_stop = tout_[k_stop];
+    if (verbose_) casadi_message("Integrating forward to output time " + str(m->k) + ": t_next = "
+      + str(m->t_next) + ", t_stop = " + str(m->t_stop));
+    advance(m, u, x, z, q);
     if (x) x += nx_;
     if (z) z += nz_;
     if (q) q += nq_;
     if (u) u += nu_;
+    m->t = m->t_next;
   }
 
   // Backwards integration, if needed
@@ -345,33 +349,43 @@ eval(const double** arg, double** res, casadi_int* iw, double* w, void* mem) con
     if (rx0) rx0 += nrx_ * nt();
     if (rz0) rz0 += nrz_ * nt();
     if (rp) rp += nrp_ * nt();
+    if (uq) uq += nuq_ * nt();
     // Next stop time due to step change in input
-    casadi_int k_stop = nt();
+    k_stop = nt();
     // Integrate backward
-    for (casadi_int k = nt(); k-- > 0; ) {
+    for (m->k = nt(); m->k-- > 0; ) {
+      m->t = tout_[m->k];
       // Reset the solver, add impulse to backwards integration
       if (rx0) rx0 -= nrx_;
       if (rz0) rz0 -= nrz_;
       if (rp) rp -= nrp_;
+      if (uq) uq -= nuq_;
       if (u) u -= nu_;
-      if (k == nt() - 1) {
-       resetB(m, tout_[k], rx0, rz0, rp);
+      if (m->k == nt() - 1) {
+        resetB(m, rx0, rz0, rp);
       } else {
-       impulseB(m, rx0, rz0, rp);
+        impulseB(m, rx0, rz0, rp);
       }
       // Next output time, or beginning
-      casadi_int k_next = k - 1;
-      double t_next = k_next < 0 ? t0_ : tout_[k_next];
+      casadi_int k_next = m->k - 1;
+      m->t_next = k_next < 0 ? t0_ : tout_[k_next];
       // Update integrator stopping time
-      if (k_next < k_stop) k_stop = next_stopB(k, u);
-      double t_stop = k_stop < 0 ? t0_ : tout_[k_stop];
+      if (k_next < k_stop) k_stop = next_stopB(m->k, u);
+      m->t_stop = k_stop < 0 ? t0_ : tout_[k_stop];
       // Proceed to the previous time point or t0
-      if (verbose_) casadi_message("Integrating backward from output time " + str(k) + ": t_next = "
-        + str(t_next) + ", t_stop = " + str(t_stop));
-      if (k > 0) {
-        retreat(m, t_next, t_stop, 0, 0, 0);
+      if (verbose_) casadi_message("Integrating backward from output time " + str(m->k)
+        + ": t_next = " + str(m->t_next) + ", t_stop = " + str(m->t_stop));
+      if (m->k > 0) {
+        retreat(m, u, 0, 0, 0, uq);
       } else {
-        retreat(m, t_next, t_stop, rx, rz, rq);
+        retreat(m, u, rx, rz, rq, uq);
+      }
+    }
+    // uq should contain the contribution from the grid point, not cumulative
+    if (uq) {
+      for (m->k = 0; m->k < nt() - 1; ++m->k) {
+        casadi_axpy(nuq_, -1., uq + nuq_, uq);
+        uq += nuq_;
       }
     }
   }
@@ -516,12 +530,16 @@ void Integrator::init(const Dict& opts) {
                           + str(nrx_+nrz_));
   }
 
-  // Consistency check
-
-  // Allocate sufficiently large work vectors
-  alloc_w(nx_+nz_);
-  alloc_w(nrx_+nrz_);
-  alloc_w(nx_ + nz_ + nrx_ + nrz_, true);
+  // Work vectors for sparsity pattern propagation: Can be reused in derived classes
+  alloc_w(nx_, true); // x
+  alloc_w(nz_, true); // z
+  alloc_w(nx_, true); // x_prev
+  alloc_w(nrx_, true); // rx
+  alloc_w(nrz_, true); // rz
+  alloc_w(nrx_, true); // rx_prev
+  alloc_w(nrq_, true); // rq
+  alloc_w(nx_+nz_);  // Sparsity::sp_solve
+  alloc_w(nrx_+nrz_);  // Sparsity::sp_solve
 }
 
 int Integrator::init_mem(void* mem) const {
@@ -537,24 +555,26 @@ std::map<std::string, MatType> Integrator::aug_fwd(casadi_int nfwd) const {
 
   // Get input expressions
   std::vector<MatType> arg = MatType::get_input(oracle_);
-  std::vector<MatType> aug_x, aug_z, aug_p, aug_rx, aug_rz, aug_rp;
+  std::vector<MatType> aug_x, aug_z, aug_p, aug_u, aug_rx, aug_rz, aug_rp;
   MatType aug_t = arg.at(DYN_T);
   aug_x.push_back(vec(arg.at(DYN_X)));
   aug_z.push_back(vec(arg.at(DYN_Z)));
   aug_p.push_back(vec(arg.at(DYN_P)));
+  aug_u.push_back(vec(arg.at(DYN_U)));
   aug_rx.push_back(vec(arg.at(DYN_RX)));
   aug_rz.push_back(vec(arg.at(DYN_RZ)));
   aug_rp.push_back(vec(arg.at(DYN_RP)));
 
   // Get output expressions
   std::vector<MatType> res = oracle_(arg);
-  std::vector<MatType> aug_ode, aug_alg, aug_quad, aug_rode, aug_ralg, aug_rquad;
+  std::vector<MatType> aug_ode, aug_alg, aug_quad, aug_rode, aug_ralg, aug_rquad, aug_uquad;
   aug_ode.push_back(vec(res.at(DYN_ODE)));
   aug_alg.push_back(vec(res.at(DYN_ALG)));
   aug_quad.push_back(vec(res.at(DYN_QUAD)));
   aug_rode.push_back(vec(res.at(DYN_RODE)));
   aug_ralg.push_back(vec(res.at(DYN_RALG)));
   aug_rquad.push_back(vec(res.at(DYN_RQUAD)));
+  aug_uquad.push_back(vec(res.at(DYN_UQUAD)));
 
   // Zero of time dimension
   MatType zero_t = MatType::zeros(t());
@@ -567,6 +587,7 @@ std::map<std::string, MatType> Integrator::aug_fwd(casadi_int nfwd) const {
     aug_x.push_back(vec(seed[d][DYN_X] = MatType::sym(pref + "x", x())));
     aug_z.push_back(vec(seed[d][DYN_Z] = MatType::sym(pref + "z", z())));
     aug_p.push_back(vec(seed[d][DYN_P] = MatType::sym(pref + "p", p())));
+    aug_u.push_back(vec(seed[d][DYN_U] = MatType::sym(pref + "u", u())));
     aug_rx.push_back(vec(seed[d][DYN_RX] = MatType::sym(pref + "rx", rx())));
     aug_rz.push_back(vec(seed[d][DYN_RZ] = MatType::sym(pref + "rz", rz())));
     aug_rp.push_back(vec(seed[d][DYN_RP] = MatType::sym(pref + "rp", rp())));
@@ -586,6 +607,7 @@ std::map<std::string, MatType> Integrator::aug_fwd(casadi_int nfwd) const {
     aug_rode.push_back(vec(project(sens[d][DYN_RODE], rx())));
     aug_ralg.push_back(vec(project(sens[d][DYN_RALG], rz())));
     aug_rquad.push_back(vec(project(sens[d][DYN_RQUAD], rq())));
+    aug_uquad.push_back(vec(project(sens[d][DYN_UQUAD], uq())));
   }
 
   // Construct return object
@@ -594,7 +616,7 @@ std::map<std::string, MatType> Integrator::aug_fwd(casadi_int nfwd) const {
   ret["x"] = horzcat(aug_x);
   ret["z"] = horzcat(aug_z);
   ret["p"] = horzcat(aug_p);
-  ret["u"] = MatType(0, ret["x"].size2());
+  ret["u"] = horzcat(aug_u);
   ret["ode"] = horzcat(aug_ode);
   ret["alg"] = horzcat(aug_alg);
   ret["quad"] = horzcat(aug_quad);
@@ -604,7 +626,8 @@ std::map<std::string, MatType> Integrator::aug_fwd(casadi_int nfwd) const {
   ret["rode"] = horzcat(aug_rode);
   ret["ralg"] = horzcat(aug_ralg);
   ret["rquad"] = horzcat(aug_rquad);
-  ret["uquad"] = MatType(0, ret["x"].size2());
+  ret["uquad"] = horzcat(aug_uquad);
+
   return ret;
 }
 
@@ -614,24 +637,26 @@ std::map<std::string, MatType> Integrator::aug_adj(casadi_int nadj) const {
 
   // Get input expressions
   std::vector<MatType> arg = MatType::get_input(oracle_);
-  std::vector<MatType> aug_x, aug_z, aug_p, aug_rx, aug_rz, aug_rp;
+  std::vector<MatType> aug_x, aug_z, aug_p, aug_u, aug_rx, aug_rz, aug_rp;
   MatType aug_t = arg.at(DYN_T);
   aug_x.push_back(vec(arg.at(DYN_X)));
   aug_z.push_back(vec(arg.at(DYN_Z)));
   aug_p.push_back(vec(arg.at(DYN_P)));
+  aug_u.push_back(vec(arg.at(DYN_U)));
   aug_rx.push_back(vec(arg.at(DYN_RX)));
   aug_rz.push_back(vec(arg.at(DYN_RZ)));
   aug_rp.push_back(vec(arg.at(DYN_RP)));
 
   // Get output expressions
   std::vector<MatType> res = oracle_(arg);
-  std::vector<MatType> aug_ode, aug_alg, aug_quad, aug_rode, aug_ralg, aug_rquad;
+  std::vector<MatType> aug_ode, aug_alg, aug_quad, aug_rode, aug_ralg, aug_rquad, aug_uquad;
   aug_ode.push_back(vec(res.at(DYN_ODE)));
   aug_alg.push_back(vec(res.at(DYN_ALG)));
   aug_quad.push_back(vec(res.at(DYN_QUAD)));
   aug_rode.push_back(vec(res.at(DYN_RODE)));
   aug_ralg.push_back(vec(res.at(DYN_RALG)));
   aug_rquad.push_back(vec(res.at(DYN_RQUAD)));
+  aug_uquad.push_back(vec(res.at(DYN_UQUAD)));
 
   // Zero of time dimension
   MatType zero_t = MatType::zeros(t());
@@ -646,6 +671,7 @@ std::map<std::string, MatType> Integrator::aug_adj(casadi_int nadj) const {
     aug_x.push_back(vec(seed[d][DYN_RODE] = MatType::sym(pref + "rode", rx())));
     aug_z.push_back(vec(seed[d][DYN_RALG] = MatType::sym(pref + "ralg", rz())));
     aug_p.push_back(vec(seed[d][DYN_RQUAD] = MatType::sym(pref + "rquad", rq())));
+    aug_u.push_back(vec(seed[d][DYN_UQUAD] = MatType::sym(pref + "uquad", uq())));
   }
 
   // Calculate directional derivatives
@@ -659,6 +685,7 @@ std::map<std::string, MatType> Integrator::aug_adj(casadi_int nadj) const {
     aug_rode.push_back(vec(project(sens[d][DYN_X], x())));
     aug_ralg.push_back(vec(project(sens[d][DYN_Z], z())));
     aug_rquad.push_back(vec(project(sens[d][DYN_P], p())));
+    aug_uquad.push_back(vec(project(sens[d][DYN_U], u())));
     aug_ode.push_back(vec(project(sens[d][DYN_RX], rx())));
     aug_alg.push_back(vec(project(sens[d][DYN_RZ], rz())));
     aug_quad.push_back(vec(project(sens[d][DYN_RP], rp())));
@@ -670,7 +697,7 @@ std::map<std::string, MatType> Integrator::aug_adj(casadi_int nadj) const {
   ret["x"] = vertcat(aug_x);
   ret["z"] = vertcat(aug_z);
   ret["p"] = vertcat(aug_p);
-  ret["u"] = MatType(0, ret["x"].size2());
+  ret["u"] = vertcat(aug_u);
   ret["ode"] = vertcat(aug_ode);
   ret["alg"] = vertcat(aug_alg);
   ret["quad"] = vertcat(aug_quad);
@@ -680,17 +707,17 @@ std::map<std::string, MatType> Integrator::aug_adj(casadi_int nadj) const {
   ret["rode"] = vertcat(aug_rode);
   ret["ralg"] = vertcat(aug_ralg);
   ret["rquad"] = vertcat(aug_rquad);
-  ret["uquad"] = MatType(0, ret["x"].size2());
+  ret["uquad"] =  vertcat(aug_uquad);
 
   // Make sure that forward problem does not depend on backward states
-  Function f("f", {ret["t"], ret["x"], ret["z"], ret["p"]},
+  Function f("f", {ret["t"], ret["x"], ret["z"], ret["p"], ret["u"]},
                   {ret["ode"], ret["alg"], ret["quad"]}, {{"allow_free", true}});
   if (f.has_free()) {
     // Replace dependencies of rx, rz and rp with zeros
-    f = Function("f", {ret["t"], ret["x"], ret["z"], ret["p"],
+    f = Function("f", {ret["t"], ret["x"], ret["z"], ret["p"], ret["u"],
                         ret["rx"], ret["rz"], ret["rp"]},
                       {ret["ode"], ret["alg"], ret["quad"]});
-    std::vector<MatType> v = {ret["t"], ret["x"], ret["z"], ret["p"], 0, 0, 0};
+    std::vector<MatType> v = {ret["t"], ret["x"], ret["z"], ret["p"], ret["u"], 0, 0, 0};
     v = f(v);
     ret["ode"] = v.at(0);
     ret["alg"] = v.at(1);
@@ -700,86 +727,142 @@ std::map<std::string, MatType> Integrator::aug_adj(casadi_int nadj) const {
   return ret;
 }
 
-int Integrator::
-sp_forward(const bvec_t** arg, bvec_t** res, casadi_int* iw, bvec_t* w, void* mem) const {
+int Integrator::sp_forward(const bvec_t** arg, bvec_t** res,
+    casadi_int* iw, bvec_t* w, void* mem) const {
   if (verbose_) casadi_message(name_ + "::sp_forward");
 
+  // Inputs
+  const bvec_t* x0 = arg[INTEGRATOR_X0];
+  const bvec_t* p = arg[INTEGRATOR_P];
+  const bvec_t* u = arg[INTEGRATOR_U];
+  const bvec_t* rx0 = arg[INTEGRATOR_RX0];
+  const bvec_t* rp = arg[INTEGRATOR_RP];
+  arg += n_in_;
+
+  // Outputs
+  bvec_t* xf = res[INTEGRATOR_XF];
+  bvec_t* zf = res[INTEGRATOR_ZF];
+  bvec_t* qf = res[INTEGRATOR_QF];
+  bvec_t* rxf = res[INTEGRATOR_RXF];
+  bvec_t* rzf = res[INTEGRATOR_RZF];
+  bvec_t* rqf = res[INTEGRATOR_RQF];
+  bvec_t* uqf = res[INTEGRATOR_UQF];
+  res += n_out_;
+
   // Work vectors
-  bvec_t *tmp_x = w; w += nx_;
-  bvec_t *tmp_z = w; w += nz_;
-  bvec_t *tmp_rx = w; w += nrx_;
-  bvec_t *tmp_rz = w; w += nrz_;
+  bvec_t *x = w; w += nx_;
+  bvec_t *z = w; w += nz_;
+  bvec_t *x_prev = w; w += nx_;
+  bvec_t *rx = w; w += nrx_;
+  bvec_t *rz = w; w += nrz_;
+  bvec_t *rx_prev = w; w += nrx_;
+  bvec_t *rq = w; w += nrq_;
+
+  // Copy initial guess to x_prev
+  std::copy_n(x0, nx_, x_prev);
 
   // Propagate forward
-  const bvec_t** arg1 = arg+n_in_;
-  std::fill_n(arg1, static_cast<size_t>(DYN_NUM_IN), nullptr);
-  arg1[DYN_X] = arg[INTEGRATOR_X0];
-  arg1[DYN_P] = arg[INTEGRATOR_P];
-  arg1[DYN_U] = arg[INTEGRATOR_U];
-  bvec_t** res1 = res+n_out_;
-  std::fill_n(res1, static_cast<size_t>(DYN_NUM_OUT), nullptr);
-  res1[DYN_ODE] = tmp_x;
-  res1[DYN_ALG] = tmp_z;
-  oracle_(arg1, res1, iw, w, 0);
-  if (arg[INTEGRATOR_X0]) {
-    const bvec_t *tmp = arg[INTEGRATOR_X0];
-    for (casadi_int i=0; i<nx_; ++i) tmp_x[i] |= *tmp++;
-  }
-
-  // "Solve" in order to resolve interdependencies (cf. Rootfinder)
-  std::copy_n(tmp_x, nx_+nz_, w);
-  std::fill_n(tmp_x, nx_+nz_, 0);
-  sp_jac_dae_.spsolve(tmp_x, w, false);
-
-  // Get xf and zf
-  if (res[INTEGRATOR_XF]) std::copy_n(tmp_x, nx_, res[INTEGRATOR_XF]);
-  if (res[INTEGRATOR_ZF]) std::copy_n(tmp_z, nz_, res[INTEGRATOR_ZF]);
-
-  // Propagate to quadratures
-  if (nq_>0 && res[INTEGRATOR_QF]) {
-    arg1[DYN_X] = tmp_x;
-    arg1[DYN_Z] = tmp_z;
-    res1[DYN_ODE] = res1[DYN_ALG] = nullptr;
-    res1[DYN_QUAD] = res[INTEGRATOR_QF];
-    if (oracle_(arg1, res1, iw, w, 0)) return 1;
-  }
-
-  if (nrx_>0) {
-    // Propagate through g
-    std::fill_n(arg1, static_cast<size_t>(DYN_NUM_IN), nullptr);
-    arg1[DYN_X] = tmp_x;
-    arg1[DYN_P] = arg[INTEGRATOR_P];
-    arg1[DYN_U] = arg[INTEGRATOR_U];
-    arg1[DYN_Z] = tmp_z;
-    arg1[DYN_RX] = arg[INTEGRATOR_X0];
-    arg1[DYN_RX] = arg[INTEGRATOR_RX0];
-    arg1[DYN_RP] = arg[INTEGRATOR_RP];
-    std::fill_n(res1, static_cast<size_t>(DYN_NUM_OUT), nullptr);
-    res1[DYN_RODE] = tmp_rx;
-    res1[DYN_RALG] = tmp_rz;
-    oracle_(arg1, res1, iw, w, 0);
-    if (arg[INTEGRATOR_RX0]) {
-      const bvec_t *tmp = arg[INTEGRATOR_RX0];
-      for (casadi_int i=0; i<nrx_; ++i) tmp_rx[i] |= *tmp++;
-    }
+  for (casadi_int k = 0; k < nt(); ++k) {
+    // Propagate through DAE function
+    std::fill(arg, arg + DYN_NUM_IN, nullptr);
+    arg[DYN_X] = x_prev;
+    arg[DYN_P] = p;
+    arg[DYN_U] = u;
+    std::fill(res, res + DYN_NUM_OUT, nullptr);
+    res[DYN_ODE] = x;
+    res[DYN_ALG] = z;
+    oracle_(arg, res, iw, w, 0);
+    for (casadi_int i = 0; i < nx_; ++i) x[i] |= x_prev[i];
 
     // "Solve" in order to resolve interdependencies (cf. Rootfinder)
-    std::copy_n(tmp_rx, nrx_+nrz_, w);
-    std::fill_n(tmp_rx, nrx_+nrz_, 0);
-    sp_jac_rdae_.spsolve(tmp_rx, w, false);
+    std::copy_n(x, nx_ + nz_, w);
+    std::fill_n(x, nx_ + nz_, 0);
+    sp_jac_dae_.spsolve(x, w, false);
 
-    // Get rxf and rzf
-    if (res[INTEGRATOR_RXF]) std::copy_n(tmp_rx, nrx_, res[INTEGRATOR_RXF]);
-    if (res[INTEGRATOR_RZF]) std::copy_n(tmp_rz, nrz_, res[INTEGRATOR_RZF]);
+    // Get xf and zf
+    if (xf) std::copy_n(x, nx_, xf);
+    if (zf) std::copy_n(z, nz_, zf);
 
     // Propagate to quadratures
-    if (nrq_>0 && res[INTEGRATOR_RQF]) {
-      arg1[DYN_RX] = tmp_rx;
-      arg1[DYN_RZ] = tmp_rz;
-      res1[DYN_RODE] = res1[DYN_RALG] = nullptr;
-      res1[DYN_RQUAD] = res[INTEGRATOR_RQF];
-      if (oracle_(arg1, res1, iw, w, 0)) return 1;
+    if (nq_ > 0 && qf) {
+      arg[DYN_X] = x;
+      arg[DYN_Z] = z;
+      res[DYN_ODE] = res[DYN_ALG] = nullptr;
+      res[DYN_QUAD] = qf;
+      if (oracle_(arg, res, iw, w, 0)) return 1;
     }
+
+    // Shift time
+    std::copy_n(x, nx_, x_prev);
+    if (xf) xf += nx_;
+    if (zf) zf += nz_;
+    if (qf) qf += nq_;
+    if (u) u += nu_;
+  }
+
+  if (nrx_ > 0) {
+    // Clear rx_prev, rqf
+    std::fill_n(rx_prev, nrx_, 0);
+    std::fill_n(rqf, nrq_, 0);
+
+    // Take rx0, rp, uqf past the last grid point
+    if (rx0) rx0 += nrx_ * nt();
+    if (rp) rp += nrp_ * nt();
+    if (uqf) uqf += nuq_ * nt();
+
+    // Integrate backward
+    for (casadi_int k = nt(); k-- > 0; ) {
+      // Shift time
+      if (rx0) rx0 -= nrx_;
+      if (rp) rp -= nrp_;
+      if (uqf) uqf -= nuq_;
+      if (u) u -= nu_;
+
+      // Add impulse from rx0
+      if (rx0) {
+        for (casadi_int i = 0; i < nrx_; ++i) rx_prev[i] |= rx0[i];
+      }
+
+      // Propagate through DAE function
+      std::fill(arg, arg + DYN_NUM_IN, nullptr);
+      arg[DYN_X] = x;
+      arg[DYN_P] = p;
+      arg[DYN_U] = u;
+      arg[DYN_Z] = z;
+      arg[DYN_RX] = rx_prev;
+      arg[DYN_RP] = rp;
+      std::fill(res, res + DYN_NUM_OUT, nullptr);
+      res[DYN_RODE] = rx;
+      res[DYN_RALG] = rz;
+      oracle_(arg, res, iw, w, 0);
+      for (casadi_int i = 0; i < nrx_; ++i) rx[i] |= rx_prev[i];
+
+      // "Solve" in order to resolve interdependencies (cf. Rootfinder)
+      std::copy_n(rx, nrx_ + nrz_, w);
+      std::fill_n(rx, nrx_ + nrz_, 0);
+      sp_jac_rdae_.spsolve(rx, w, false);
+
+      // Propagate to quadratures
+      if ((nrq_ > 0 && rqf) || (nuq_ > 0 && uqf)) {
+        arg[DYN_RX] = rx;
+        arg[DYN_RZ] = rz;
+        res[DYN_RODE] = res[DYN_RALG] = nullptr;
+        res[DYN_RQUAD] = rq;
+        res[DYN_UQUAD] = uqf;
+        if (oracle_(arg, res, iw, w, 0)) return 1;
+        // Sum contributions to rqf
+        if (rqf) {
+          for (casadi_int i = 0; i < nrq_; ++i) rqf[i] |= rq[i];
+        }
+      }
+
+      // Update rx_prev
+      std::copy_n(rx, nx_, rx_prev);
+    }
+
+    // Get rxf and rzf at initial time
+    if (rxf) std::copy_n(rx, nrx_, rxf);
+    if (rzf) std::copy_n(rz, nrz_, rzf);
   }
   return 0;
 }
@@ -788,118 +871,118 @@ int Integrator::sp_reverse(bvec_t** arg, bvec_t** res,
     casadi_int* iw, bvec_t* w, void* mem) const {
   if (verbose_) casadi_message(name_ + "::sp_reverse");
 
-  // Work vectors
-  bvec_t** arg1 = arg+n_in_;
-  bvec_t** res1 = res+n_out_;
-  bvec_t *tmp_x = w; w += nx_;
-  bvec_t *tmp_z = w; w += nz_;
-
-  // Shorthands
+  // Inputs
   bvec_t* x0 = arg[INTEGRATOR_X0];
   bvec_t* p = arg[INTEGRATOR_P];
   bvec_t* u = arg[INTEGRATOR_U];
+  bvec_t* rx0 = arg[INTEGRATOR_RX0];
+  bvec_t* rp = arg[INTEGRATOR_RP];
+  arg += n_in_;
+
+  // Outputs
   bvec_t* xf = res[INTEGRATOR_XF];
   bvec_t* zf = res[INTEGRATOR_ZF];
   bvec_t* qf = res[INTEGRATOR_QF];
+  bvec_t* rxf = res[INTEGRATOR_RXF];
+  bvec_t* rzf = res[INTEGRATOR_RZF];
+  bvec_t* rqf = res[INTEGRATOR_RQF];
+  bvec_t* uqf = res[INTEGRATOR_UQF];
+  res += n_out_;
+
+  // Work vectors
+  bvec_t *x = w; w += nx_;
+  bvec_t *z = w; w += nz_;
+  bvec_t *rx = w; w += nrx_;
+  bvec_t *rz = w; w += nrz_;
 
   // Propagate from outputs to state vectors
   if (xf) {
-    std::copy_n(xf, nx_, tmp_x);
+    std::copy_n(xf, nx_, x);
     std::fill_n(xf, nx_, 0);
   } else {
-    std::fill_n(tmp_x, nx_, 0);
+    std::fill_n(x, nx_, 0);
   }
   if (zf) {
-    std::copy_n(zf, nz_, tmp_z);
+    std::copy_n(zf, nz_, z);
     std::fill_n(zf, nz_, 0);
   } else {
-    std::fill_n(tmp_z, nz_, 0);
+    std::fill_n(z, nz_, 0);
   }
 
   if (nrx_>0) {
-    // Work vectors
-    bvec_t *tmp_rx = w; w += nrx_;
-    bvec_t *tmp_rz = w; w += nrz_;
-
-    // Shorthands
-    bvec_t* rx0 = arg[INTEGRATOR_RX0];
-    bvec_t* rp = arg[INTEGRATOR_RP];
-    bvec_t* rxf = res[INTEGRATOR_RXF];
-    bvec_t* rzf = res[INTEGRATOR_RZF];
-    bvec_t* rqf = res[INTEGRATOR_RQF];
-    bvec_t* uqf = res[INTEGRATOR_UQF];
-
     // Propagate from outputs to state vectors
     if (rxf) {
-      std::copy_n(rxf, nrx_, tmp_rx);
+      std::copy_n(rxf, nrx_, rx);
       std::fill_n(rxf, nrx_, 0);
     } else {
-      std::fill_n(tmp_rx, nrx_, 0);
+      std::fill_n(rx, nrx_, 0);
     }
     if (rzf) {
-      std::copy_n(rzf, nrz_, tmp_rz);
+      std::copy_n(rzf, nrz_, rz);
       std::fill_n(rzf, nrz_, 0);
     } else {
-      std::fill_n(tmp_rz, nrz_, 0);
+      std::fill_n(rz, nrz_, 0);
     }
 
     // Get dependencies from backward quadratures
-    std::fill_n(res1, static_cast<size_t>(DYN_NUM_OUT), nullptr);
-    std::fill_n(arg1, static_cast<size_t>(DYN_NUM_IN), nullptr);
-    res1[DYN_RQUAD] = rqf;
-    arg1[DYN_X] = tmp_x;
-    arg1[DYN_Z] = tmp_z;
-    arg1[DYN_P] = p;
-    arg1[DYN_U] = u;
-    arg1[DYN_RX] = tmp_rx;
-    arg1[DYN_RZ] = tmp_rz;
-    arg1[DYN_RP] = rp;
-    if (oracle_.rev(arg1, res1, iw, w, 0)) return 1;
+    std::fill(res, res + DYN_NUM_OUT, nullptr);
+    res[DYN_RQUAD] = rqf;
+    res[DYN_UQUAD] = uqf;
+    std::fill(arg, res + DYN_NUM_IN, nullptr);
+    arg[DYN_X] = x;
+    arg[DYN_Z] = z;
+    arg[DYN_P] = p;
+    arg[DYN_U] = u;
+    arg[DYN_RX] = rx;
+    arg[DYN_RZ] = rz;
+    arg[DYN_RP] = rp;
+    if (oracle_.rev(arg, res, iw, w, 0)) return 1;
 
     // Propagate interdependencies
     std::fill_n(w, nrx_+nrz_, 0);
-    sp_jac_rdae_.spsolve(w, tmp_rx, true);
-    std::copy_n(w, nrx_+nrz_, tmp_rx);
+    sp_jac_rdae_.spsolve(w, rx, true);
+    std::copy_n(w, nrx_+nrz_, rx);
 
     // Direct dependency rx0 -> rxf
-    if (rx0) for (casadi_int i=0; i<nrx_; ++i) rx0[i] |= tmp_rx[i];
+    if (rx0) for (casadi_int i=0; i<nrx_; ++i) rx0[i] |= rx[i];
 
     // Indirect dependency via g
-    res1[DYN_RODE] = tmp_rx;
-    res1[DYN_RALG] = tmp_rz;
-    res1[DYN_RQUAD] = nullptr;
-    arg1[DYN_RX] = rx0;
-    arg1[DYN_RZ] = nullptr; // arg[INTEGRATOR_RZ0] is a guess, no dependency
-    if (oracle_.rev(arg1, res1, iw, w, 0)) return 1;
+    res[DYN_RODE] = rx;
+    res[DYN_RALG] = rz;
+    res[DYN_RQUAD] = nullptr;
+    res[DYN_UQUAD] = nullptr;
+    arg[DYN_RX] = rx0;
+    arg[DYN_RZ] = nullptr; // INTEGRATOR_RZ0 is a guess, not a dependency
+    if (oracle_.rev(arg, res, iw, w, 0)) return 1;
   }
 
   // Get dependencies from forward quadratures
-  std::fill_n(res1, static_cast<size_t>(DYN_NUM_OUT), nullptr);
-  std::fill_n(arg1, static_cast<size_t>(DYN_NUM_IN), nullptr);
-  res1[DYN_QUAD] = qf;
-  arg1[DYN_X] = tmp_x;
-  arg1[DYN_Z] = tmp_z;
-  arg1[DYN_P] = p;
-  arg1[DYN_U] = u;
+  std::fill(res, res + DYN_NUM_OUT, nullptr);
+  res[DYN_QUAD] = qf;
+  std::fill(arg, arg + DYN_NUM_IN, nullptr);
+  arg[DYN_X] = x;
+  arg[DYN_Z] = z;
+  arg[DYN_P] = p;
+  arg[DYN_U] = u;
   if (qf && nq_>0) {
-    if (oracle_.rev(arg1, res1, iw, w, 0)) return 1;
+    if (oracle_.rev(arg, res, iw, w, 0)) return 1;
   }
 
   // Propagate interdependencies
   std::fill_n(w, nx_+nz_, 0);
-  sp_jac_dae_.spsolve(w, tmp_x, true);
-  std::copy_n(w, nx_+nz_, tmp_x);
+  sp_jac_dae_.spsolve(w, x, true);
+  std::copy_n(w, nx_+nz_, x);
 
   // Direct dependency x0 -> xf
-  if (x0) for (casadi_int i=0; i<nx_; ++i) x0[i] |= tmp_x[i];
+  if (x0) for (casadi_int i=0; i<nx_; ++i) x0[i] |= x[i];
 
   // Indirect dependency through f
-  res1[DYN_ODE] = tmp_x;
-  res1[DYN_ALG] = tmp_z;
-  res1[DYN_QUAD] = nullptr;
-  arg1[DYN_X] = x0;
-  arg1[DYN_Z] = nullptr; // arg[INTEGRATOR_Z0] is a guess, no dependency
-  if (oracle_.rev(arg1, res1, iw, w, 0)) return 1;
+  res[DYN_ODE] = x;
+  res[DYN_ALG] = z;
+  res[DYN_QUAD] = nullptr;
+  arg[DYN_X] = x0;
+  arg[DYN_Z] = nullptr; // INTEGRATOR_Z0 is a guess, no dependency
+  if (oracle_.rev(arg, res, iw, w, 0)) return 1;
   return 0;
 }
 
@@ -1183,7 +1266,7 @@ FixedStepIntegrator::FixedStepIntegrator(const std::string& name, const Function
     double t0, const std::vector<double>& tout) : Integrator(name, dae, t0, tout) {
 
   // Default options
-  nk_ = 20;
+  nk_target_ = 20;
 }
 
 FixedStepIntegrator::~FixedStepIntegrator() {
@@ -1194,7 +1277,8 @@ const Options FixedStepIntegrator::options_
 = {{&Integrator::options_},
     {{"number_of_finite_elements",
       {OT_INT,
-      "Number of finite elements"}},
+      "Target number of finite elements. "
+      "The actual number may be higher to accommodate all output times"}},
     {"simplify",
       {OT_BOOL,
       "Implement as MX Function (codegeneratable/serializable) default: false"}},
@@ -1208,13 +1292,10 @@ const Options FixedStepIntegrator::options_
 Function FixedStepIntegrator::create_advanced(const Dict& opts) {
   Function temp = Function::create(this, opts);
 
-  // Controls and not implemented
-  casadi_assert(nu_ == 0, "Not implemented");
-
   // Check if we need to simplify
   bool simplify = false;
   auto it = opts.find("simplify");
-  if (it!=opts.end()) simplify = it->second;
+  if (it != opts.end()) simplify = it->second;
 
   if (simplify && nrx_==0 && nt()==1) {
     // Retrieve explicit simulation step (one finite element)
@@ -1229,29 +1310,34 @@ Function FixedStepIntegrator::create_advanced(const Dict& opts) {
     std::vector<MX> intg_in(INTEGRATOR_NUM_IN);
     intg_in[INTEGRATOR_X0] = F_in[FSTEP_X0];
     intg_in[INTEGRATOR_P] = F_in[FSTEP_P];
+    intg_in[INTEGRATOR_U] = F_in[FSTEP_U];
     intg_in[INTEGRATOR_Z0] = z0;
-    F_in[FSTEP_Z0] = algebraic_state_init(intg_in[INTEGRATOR_X0], z0);
+    F_in[FSTEP_V0] = algebraic_state_init(intg_in[INTEGRATOR_X0], z0);
+
+    // Number of finite elements and time steps
+    double h = (tout_.back() - t0_)/static_cast<double>(disc_.back());
 
     // Prepare return Function outputs
     std::vector<MX> intg_out(INTEGRATOR_NUM_OUT);
-    F_in[FSTEP_T] = t0_;
+    F_in[FSTEP_T0] = t0_;
+    F_in[FSTEP_H] = h;
 
     std::vector<MX> F_out;
     // Loop over finite elements
-    for (casadi_int k=0; k<nk_; ++k) {
+    for (casadi_int k=0; k<disc_.back(); ++k) {
       F_out = F(F_in);
 
       F_in[FSTEP_X0] = F_out[FSTEP_XF];
-      F_in[FSTEP_Z0] = F_out[FSTEP_RES];
+      F_in[FSTEP_V0] = F_out[FSTEP_VF];
       intg_out[INTEGRATOR_QF] = k==0? F_out[FSTEP_QF] : intg_out[INTEGRATOR_QF]+F_out[FSTEP_QF];
-      F_in[FSTEP_T] += h_;
+      F_in[FSTEP_T0] += h;
     }
 
     intg_out[INTEGRATOR_XF] = F_out[FSTEP_XF];
 
-    // If-clause needed because rk abuses FSTEP_RES output for intermediate state output
+    // If-clause needed because rk abuses FSTEP_VF output for intermediate state output
     if (nz_) {
-      intg_out[INTEGRATOR_ZF] = algebraic_state_output(F_out[FSTEP_RES]);
+      intg_out[INTEGRATOR_ZF] = algebraic_state_output(F_out[FSTEP_VF]);
     }
 
     // Extract options for Function constructor
@@ -1273,235 +1359,275 @@ void FixedStepIntegrator::init(const Dict& opts) {
   // Read options
   for (auto&& op : opts) {
     if (op.first=="number_of_finite_elements") {
-      nk_ = op.second;
+      nk_target_ = op.second;
     }
   }
 
-  // Number of finite elements and time steps
-  casadi_assert_dev(nk_>0);
-  h_ = (tout_.back() - t0_)/static_cast<double>(nk_);
+  // Consistency check
+  casadi_assert(nk_target_ > 0, "Number of finite elements must be strictly positive");
+
+  // Target interval length
+  double h_target = (tout_.back() - t0_) / nk_target_;
+
+  // Number of finite elements for each control interval and in total
+  disc_.reserve(1 + nt());
+  disc_.push_back(0);
+  double t_cur = t0_;
+  for (double t_next : tout_) {
+    disc_.push_back(disc_.back() + std::ceil((t_next - t_cur) / h_target));
+    t_cur = t_next;
+  }
 
   // Setup discrete time dynamics
   setupFG();
 
   // Get discrete time dimensions
-  nZ_ = F_.nnz_in(FSTEP_Z0);
-  nRZ_ =  G_.is_null() ? 0 : G_.nnz_in(BSTEP_RZ0);
+  nv_ = F_.nnz_in(FSTEP_V0);
+  nrv_ =  G_.is_null() ? 0 : G_.nnz_in(BSTEP_RV0);
+
+  // Work vectors, forward problem
+  alloc_w(nv_, true); // v
+  alloc_w(np_, true); // p
+  alloc_w(nu_, true); // u
+  alloc_w(nq_, true); // q
+  alloc_w(nv_, true); // v_prev
+  alloc_w(nq_, true); // q_prev
+
+  // Work vectors, backward problem
+  alloc_w(nrv_, true); // rv
+  alloc_w(nrp_, true); // rp
+  alloc_w(nuq_, true); // uq
+  alloc_w(nrv_, true); // rv_prev
+  alloc_w(nrq_, true); // rq_prev
+  alloc_w(nuq_, true); // uq_prev
+
+  // Allocate tape if backward states are present
+  if (nrx_ > 0) {
+    alloc_w((disc_.back() + 1) * nx_, true); // x_tape
+    alloc_w(disc_.back() * nv_, true); // v_tape
+  }
+}
+
+void FixedStepIntegrator::set_work(void* mem, const double**& arg, double**& res,
+    casadi_int*& iw, double*& w) const {
+  auto m = static_cast<FixedStepMemory*>(mem);
+
+  // Set work in base classes
+  Integrator::set_work(mem, arg, res, iw, w);
+
+  // Work vectors, allocated in base class
+  m->x = w; w += nx_;
+  m->z = w; w += nz_;
+  m->rx = w; w += nrx_;
+  m->rz = w; w += nrz_;
+  m->x_prev = w; w += nx_;
+  m->rx_prev = w; w += nrx_;
+  m->rq = w; w += nrq_;
+
+  // Work vectors, forward problem
+  m->v = w; w += nv_;
+  m->p = w; w += np_;
+  m->u = w; w += nu_;
+  m->q = w; w += nq_;
+  m->v_prev = w; w += nv_;
+  m->q_prev = w; w += nq_;
+
+  // Work vectors, backward problem
+  m->rv = w; w += nrv_;
+  m->rp = w; w += nrp_;
+  m->uq = w; w += nuq_;
+  m->rv_prev = w; w += nrv_;
+  m->rq_prev = w; w += nrq_;
+  m->uq_prev = w; w += nuq_;
+
+  // Allocate tape if backward states are present
+  if (nrx_ > 0) {
+    m->x_tape = w; w += (disc_.back() + 1) * nx_;
+    m->v_tape = w; w += disc_.back() * nv_;
+  }
 }
 
 int FixedStepIntegrator::init_mem(void* mem) const {
   if (Integrator::init_mem(mem)) return 1;
-  auto m = static_cast<FixedStepMemory*>(mem);
-
-  // Discrete time algebraic variable
-  m->Z.resize(F_.nnz_in(FSTEP_Z0));
-  if (!G_.is_null()) m->RZ.resize(G_.nnz_in(BSTEP_RZ0));
-
-  // Allocate tape if backward states are present
-  if (nrx_>0) {
-    m->x_tape.resize(nk_+1, std::vector<double>(nx_));
-    m->Z_tape.resize(nk_, std::vector<double>(nZ_));
-  }
-
-  // Allocate state
-  m->x.resize(nx_);
-  m->z.resize(nz_);
-  m->p.resize(np_);
-  m->u.resize(nu_);
-  m->q.resize(nq_);
-  m->rx.resize(nrx_);
-  m->rz.resize(nrz_);
-  m->rp.resize(nrp_);
-  m->rq.resize(nrq_);
-  m->uq.resize(nuq_);
-  m->x_prev.resize(nx_);
-  m->Z_prev.resize(nZ_);
-  m->q_prev.resize(nq_);
-  m->rx_prev.resize(nrx_);
-  m->RZ_prev.resize(nRZ_);
-  m->rq_prev.resize(nrq_);
+  // auto m = static_cast<FixedStepMemory*>(mem);
 
   return 0;
 }
 
-void FixedStepIntegrator::advance(IntegratorMemory* mem, double t_next, double t_stop,
+
+void FixedStepIntegrator::advance(IntegratorMemory* mem,
     const double* u, double* x, double* z, double* q) const {
   auto m = static_cast<FixedStepMemory*>(mem);
 
-  // The fixed-step integrators take steps aligned with output times, t_stop not needed
-  (void)t_stop;  // unused
-
   // Set controls
-  casadi_copy(u, nu_, get_ptr(m->u));
-
-  // Get discrete time sought
-  casadi_int k_out = static_cast<casadi_int>(std::ceil((t_next - t0_)/h_));
-  k_out = std::min(k_out, nk_); //  make sure that rounding errors does not result in k_out>nk_
-  casadi_assert_dev(k_out>=0);
+  casadi_copy(u, nu_, m->u);
 
   // Explicit discrete time dynamics
   const Function& F = getExplicit();
 
+  // Number of finite elements and time steps
+  casadi_int nj = disc_[m->k + 1] - disc_[m->k];
+  double h = (m->t_next - m->t) / nj;
+
+  // Current time
+  double t;
+
   // Discrete dynamics function inputs ...
   std::fill_n(m->arg, F.n_in(), nullptr);
-  m->arg[FSTEP_T] = &m->t;
-  m->arg[FSTEP_X0] = get_ptr(m->x_prev);
-  m->arg[FSTEP_Z0] = get_ptr(m->Z_prev);
-  m->arg[FSTEP_P] = get_ptr(m->p);
-  m->arg[FSTEP_U] = get_ptr(m->u);
+  m->arg[FSTEP_T0] = &t;
+  m->arg[FSTEP_H] = &h;
+  m->arg[FSTEP_X0] = m->x_prev;
+  m->arg[FSTEP_V0] = m->v_prev;
+  m->arg[FSTEP_P] = m->p;
+  m->arg[FSTEP_U] = m->u;
 
   // ... and outputs
   std::fill_n(m->res, F.n_out(), nullptr);
-  m->res[FSTEP_XF] = get_ptr(m->x);
-  m->res[FSTEP_RES] = get_ptr(m->Z);
-  m->res[FSTEP_QF] = get_ptr(m->q);
+  m->res[FSTEP_XF] = m->x;
+  m->res[FSTEP_VF] = m->v;
+  m->res[FSTEP_QF] = m->q;
 
-  // Take time steps until end time has been reached
-  while (m->k<k_out) {
+  // Take steps
+  for (casadi_int j = 0; j < nj; ++j) {
+    // Update time
+    t = m->t + j * h;
+
     // Update the previous step
-    casadi_copy(get_ptr(m->x), nx_, get_ptr(m->x_prev));
-    casadi_copy(get_ptr(m->Z), nZ_, get_ptr(m->Z_prev));
-    casadi_copy(get_ptr(m->q), nq_, get_ptr(m->q_prev));
+    casadi_copy(m->x, nx_, m->x_prev);
+    casadi_copy(m->v, nv_, m->v_prev);
+    casadi_copy(m->q, nq_, m->q_prev);
 
     // Take step
     F(m->arg, m->res, m->iw, m->w);
-    casadi_axpy(nq_, 1., get_ptr(m->q_prev), get_ptr(m->q));
+    casadi_axpy(nq_, 1., m->q_prev, m->q);
 
-    // Tape
-    if (nrx_>0) {
-      casadi_copy(get_ptr(m->x), nx_, get_ptr(m->x_tape.at(m->k+1)));
-      casadi_copy(get_ptr(m->Z), m->Z.size(), get_ptr(m->Z_tape.at(m->k)));
+    // Save state, if needed
+    if (nrx_ > 0) {
+      casadi_int tapeind = disc_[m->k] + j;
+      casadi_copy(m->x, nx_, m->x_tape + nx_ * (tapeind + 1));
+      casadi_copy(m->v, nv_, m->v_tape + nv_ * tapeind);
     }
-
-    // Advance time
-    m->k++;
-    m->t = t0_ + static_cast<double>(m->k)*h_;
   }
 
-  // Return to user TODO(@jaeandersson): interpolate
-  casadi_copy(get_ptr(m->x), nx_, x);
-  casadi_copy(get_ptr(m->Z)+m->Z.size()-nz_, nz_, z);
-  casadi_copy(get_ptr(m->q), nq_, q);
+  // Return to user
+  casadi_copy(m->x, nx_, x);
+  casadi_copy(m->v + nv_ - nz_, nz_, z);
+  casadi_copy(m->q, nq_, q);
 }
 
-void FixedStepIntegrator::retreat(IntegratorMemory* mem, double t_next, double t_stop,
-    double* rx, double* rz, double* rq) const {
+void FixedStepIntegrator::retreat(IntegratorMemory* mem, const double* u,
+    double* rx, double* rz, double* rq, double* uq) const {
   auto m = static_cast<FixedStepMemory*>(mem);
 
-  // The fixed-step integrators take steps aligned with output times, t_stop not needed
-  (void)t_stop;  // unused
-
-  // Get discrete time sought
-  casadi_int k_out = static_cast<casadi_int>(std::floor((t_next - t0_)/h_));
-  //  make sure that rounding errors does not result in k_out>nk_
-  k_out = std::max(k_out, casadi_int(0));
-  casadi_assert_dev(k_out <= nk_);
+  // Set controls
+  casadi_copy(u, nu_, m->u);
 
   // Explicit discrete time dynamics
   const Function& G = getExplicitB();
 
+  // Number of finite elements and time steps
+  casadi_int nj = disc_[m->k + 1] - disc_[m->k];
+  double h = (m->t - m->t_next) / nj;
+
+  // Current time
+  double t;
+
   // Discrete dynamics function inputs ...
   std::fill_n(m->arg, G.n_in(), nullptr);
-  m->arg[BSTEP_T] = &m->t;
-  m->arg[BSTEP_P] = get_ptr(m->p);
-  m->arg[BSTEP_U] = get_ptr(m->u);
-  m->arg[BSTEP_RX0] = get_ptr(m->rx_prev);
-  m->arg[BSTEP_RZ0] = get_ptr(m->RZ_prev);
-  m->arg[BSTEP_RP] = get_ptr(m->rp);
+  m->arg[BSTEP_T0] = &t;
+  m->arg[BSTEP_H] = &h;
+  m->arg[BSTEP_P] = m->p;
+  m->arg[BSTEP_U] = m->u;
+  m->arg[BSTEP_RX0] = m->rx_prev;
+  m->arg[BSTEP_RV0] = m->rv_prev;
+  m->arg[BSTEP_RP] = m->rp;
 
   // ... and outputs
   std::fill_n(m->res, G.n_out(), nullptr);
-  m->res[BSTEP_RXF] = get_ptr(m->rx);
-  m->res[BSTEP_RES] = get_ptr(m->RZ);
-  m->res[BSTEP_QF] = get_ptr(m->rq);
+  m->res[BSTEP_RXF] = m->rx;
+  m->res[BSTEP_RVF] = m->rv;
+  m->res[BSTEP_RQF] = m->rq;
+  m->res[BSTEP_UQF] = m->uq;
 
-  // Take time steps until end time has been reached
-  while (m->k>k_out) {
-    // Advance time
-    m->k--;
-    m->t = t0_ + static_cast<double>(m->k)*h_;
+  // Take steps
+  for (casadi_int j = nj; j-- > 0; ) {
+    // Update time
+    t = m->t_next + j * h;
 
     // Update the previous step
-    casadi_copy(get_ptr(m->rx), nrx_, get_ptr(m->rx_prev));
-    casadi_copy(get_ptr(m->RZ), nRZ_, get_ptr(m->RZ_prev));
-    casadi_copy(get_ptr(m->rq), nrq_, get_ptr(m->rq_prev));
+    casadi_copy(m->rx, nrx_, m->rx_prev);
+    casadi_copy(m->rv, nrv_, m->rv_prev);
+    casadi_copy(m->rq, nrq_, m->rq_prev);
+    casadi_copy(m->uq, nuq_, m->uq_prev);
 
     // Take step
-    m->arg[BSTEP_X] = get_ptr(m->x_tape.at(m->k));
-    m->arg[BSTEP_Z] = get_ptr(m->Z_tape.at(m->k));
+    casadi_int tapeind = disc_[m->k] + j;
+    m->arg[BSTEP_X] = m->x_tape + nx_ * tapeind;
+    m->arg[BSTEP_V] = m->v_tape + nv_ * tapeind;
     G(m->arg, m->res, m->iw, m->w);
-    casadi_axpy(nrq_, 1., get_ptr(m->rq_prev), get_ptr(m->rq));
+    casadi_axpy(nrq_, 1., m->rq_prev, m->rq);
+    casadi_axpy(nuq_, 1., m->uq_prev, m->uq);
   }
 
-  // Return to user TODO(@jaeandersson): interpolate
-  casadi_copy(get_ptr(m->rx), nrx_, rx);
-  casadi_copy(get_ptr(m->RZ)+m->RZ.size()-nrz_, nrz_, rz);
-  casadi_copy(get_ptr(m->rq), nrq_, rq);
+  // Return to user
+  casadi_copy(m->rx, nrx_, rx);
+  casadi_copy(m->rv + nrv_ - nrz_, nrz_, rz);
+  casadi_copy(m->rq, nrq_, rq);
+  casadi_copy(m->uq, nuq_, uq);
 }
 
 void FixedStepIntegrator::
-reset(IntegratorMemory* mem, double t,
+reset(IntegratorMemory* mem,
       const double* x, const double* z, const double* p) const {
   auto m = static_cast<FixedStepMemory*>(mem);
 
-  // Update time
-  m->t = t;
-
   // Set parameters
-  casadi_copy(p, np_, get_ptr(m->p));
+  casadi_copy(p, np_, m->p);
 
   // Update the state
-  casadi_copy(x, nx_, get_ptr(m->x));
-  casadi_copy(z, nz_, get_ptr(m->z));
+  casadi_copy(x, nx_, m->x);
+  casadi_copy(z, nz_, m->z);
 
   // Reset summation states
-  casadi_clear(get_ptr(m->q), nq_);
-
-  // Bring discrete time to the beginning
-  m->k = 0;
+  casadi_clear(m->q, nq_);
 
   // Get consistent initial conditions
-  casadi_fill(get_ptr(m->Z), m->Z.size(), std::numeric_limits<double>::quiet_NaN());
+  casadi_fill(m->v, nv_, std::numeric_limits<double>::quiet_NaN());
 
   // Add the first element in the tape
-  if (nrx_>0) {
-    casadi_copy(x, nx_, get_ptr(m->x_tape.at(0)));
+  if (nrx_ > 0) {
+    casadi_copy(x, nx_, m->x_tape);
   }
 }
 
-void FixedStepIntegrator::resetB(IntegratorMemory* mem, double t, const double* rx,
-    const double* rz, const double* rp) const {
+void FixedStepIntegrator::resetB(IntegratorMemory* mem,
+    const double* rx, const double* rz, const double* rp) const {
   auto m = static_cast<FixedStepMemory*>(mem);
 
-  // Update time
-  m->t = t;
-
   // Set parameters
-  casadi_copy(rp, nrp_, get_ptr(m->rp));
+  casadi_copy(rp, nrp_, m->rp);
 
   // Update the state
-  casadi_copy(rx, nrx_, get_ptr(m->rx));
-  casadi_copy(rz, nrz_, get_ptr(m->rz));
+  casadi_copy(rx, nrx_, m->rx);
+  casadi_copy(rz, nrz_, m->rz);
 
   // Reset summation states
-  casadi_clear(get_ptr(m->rq), nrq_);
-
-  // Bring discrete time to the end
-  m->k = nk_;
+  casadi_clear(m->rq, nrq_);
+  casadi_clear(m->uq, nuq_);
 
   // Get consistent initial conditions
-  casadi_fill(get_ptr(m->RZ), m->RZ.size(), std::numeric_limits<double>::quiet_NaN());
+  casadi_fill(m->rv, nrv_, std::numeric_limits<double>::quiet_NaN());
 }
 
 void FixedStepIntegrator::impulseB(IntegratorMemory* mem,
     const double* rx, const double* rz, const double* rp) const {
   auto m = static_cast<FixedStepMemory*>(mem);
   // Add impulse to backward parameters
-  casadi_axpy(nrp_, 1., rp, get_ptr(m->rp));
+  casadi_axpy(nrp_, 1., rp, m->rp);
 
   // Add impulse to state
-  casadi_axpy(nrx_, 1., rx, get_ptr(m->rx));
-  casadi_axpy(nrz_, 1., rz, get_ptr(m->rz));
+  casadi_axpy(nrx_, 1., rx, m->rx);
+  casadi_axpy(nrz_, 1., rz, m->rz);
 }
 
 ImplicitFixedStepIntegrator::ImplicitFixedStepIntegrator(
@@ -1541,20 +1667,20 @@ void ImplicitFixedStepIntegrator::init(const Dict& opts) {
   }
 
   // Complete rootfinder dictionary
-  rootfinder_options["implicit_input"] = FSTEP_Z0;
-  rootfinder_options["implicit_output"] = FSTEP_RES;
+  rootfinder_options["implicit_input"] = FSTEP_V0;
+  rootfinder_options["implicit_output"] = FSTEP_VF;
 
   // Allocate a solver
   rootfinder_ = rootfinder(name_ + "_rootfinder", implicit_function_name,
-                                F_, rootfinder_options);
+    F_, rootfinder_options);
   alloc(rootfinder_);
 
   // Allocate a root-finding solver for the backward problem
-  if (nRZ_>0) {
+  if (nrv_>0) {
     // Options
     Dict backward_rootfinder_options = rootfinder_options;
-    backward_rootfinder_options["implicit_input"] = BSTEP_RZ0;
-    backward_rootfinder_options["implicit_output"] = BSTEP_RES;
+    backward_rootfinder_options["implicit_input"] = BSTEP_RV0;
+    backward_rootfinder_options["implicit_output"] = BSTEP_RVF;
     std::string backward_implicit_function_name = implicit_function_name;
 
     // Allocate a Newton solver
@@ -1746,20 +1872,20 @@ void FixedStepIntegrator::serialize_body(SerializingStream &s) const {
   s.version("FixedStepIntegrator", 1);
   s.pack("FixedStepIntegrator::F", F_);
   s.pack("FixedStepIntegrator::G", G_);
-  s.pack("FixedStepIntegrator::nk", nk_);
-  s.pack("FixedStepIntegrator::h", h_);
-  s.pack("FixedStepIntegrator::nZ", nZ_);
-  s.pack("FixedStepIntegrator::nRZ", nRZ_);
+  //s.pack("FixedStepIntegrator::nk", nk_);
+  //s.pack("FixedStepIntegrator::h", h_);
+  s.pack("FixedStepIntegrator::nZ", nv_);
+  s.pack("FixedStepIntegrator::nRZ", nrv_);
 }
 
 FixedStepIntegrator::FixedStepIntegrator(DeserializingStream & s) : Integrator(s) {
   s.version("FixedStepIntegrator", 1);
   s.unpack("FixedStepIntegrator::F", F_);
   s.unpack("FixedStepIntegrator::G", G_);
-  s.unpack("FixedStepIntegrator::nk", nk_);
-  s.unpack("FixedStepIntegrator::h", h_);
-  s.unpack("FixedStepIntegrator::nZ", nZ_);
-  s.unpack("FixedStepIntegrator::nRZ", nRZ_);
+  //s.unpack("FixedStepIntegrator::nk", nk_);
+  //s.unpack("FixedStepIntegrator::h", h_);
+  s.unpack("FixedStepIntegrator::nZ", nv_);
+  s.unpack("FixedStepIntegrator::nRZ", nrv_);
 }
 
 void ImplicitFixedStepIntegrator::serialize_body(SerializingStream &s) const {

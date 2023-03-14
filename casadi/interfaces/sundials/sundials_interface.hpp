@@ -41,14 +41,11 @@ namespace casadi {
 
   // IdasMemory
   struct CASADI_SUNDIALS_COMMON_EXPORT SundialsMemory : public IntegratorMemory {
-    // Current time
-    double t;
-
     // N-vectors for the forward integration
     N_Vector xz, xzdot, q;
 
     // N-vectors for the backward integration
-    N_Vector rxz, rxzdot, rq;
+    N_Vector rxz, rxzdot, ruq;
 
     // Initialize or reinitialize?
     bool first_callB;
@@ -60,7 +57,7 @@ namespace casadi {
     double *u;
 
     // Jacobian
-    double *jac, *jacB;
+    double *jacF, *jacB;
 
     /// Stats
     long nsteps, nfevals, nlinsetups, netfails;
@@ -107,6 +104,10 @@ namespace casadi {
     /** \brief  Initialize */
     void init(const Dict& opts) override;
 
+    /** \brief Set the (persistent) work vectors */
+    void set_work(void* mem, const double**& arg, double**& res,
+      casadi_int*& iw, double*& w) const override;
+
     /** \brief Initalize memory block */
     int init_mem(void* mem) const override;
 
@@ -116,8 +117,11 @@ namespace casadi {
     /** \brief Get absolute tolerance */
     double get_abstol() const override { return abstol_;}
 
-    // Get system Jacobian
-    virtual Function getJ(bool backward) const = 0;
+    // Get system Jacobian, forward problem
+    virtual Function get_jacF(Sparsity* sp) const = 0;
+
+    // Get system Jacobian, backward problem
+    virtual Function get_jacB(Sparsity* sp) const = 0;
 
     /// Get all statistics
     Dict get_stats(void* mem) const override;
@@ -126,11 +130,11 @@ namespace casadi {
     void print_stats(IntegratorMemory* mem) const override;
 
     /** \brief  Reset the forward problem and bring the time back to t0 */
-    void reset(IntegratorMemory* mem, double t, const double* x,
+    void reset(IntegratorMemory* mem, const double* x,
       const double* z, const double* p) const override;
 
     /** \brief  Reset the backward problem and take time to tf */
-    void resetB(IntegratorMemory* mem, double t, const double* rx,
+    void resetB(IntegratorMemory* mem, const double* rx,
       const double* rz, const double* rp) const override;
 
     /** \brief Introduce an impulse into the backwards integration at the current time */
@@ -175,10 +179,6 @@ namespace casadi {
 
     /// Linear solver data (dense) -- what is this?
     struct LinSolDataDense {};
-
-    /** \brief Set the (persistent) work vectors */
-    void set_work(void* mem, const double**& arg, double**& res,
-                          casadi_int*& iw, double*& w) const override;
 
     // Print a variable
     static void printvar(const std::string& id, double v) {

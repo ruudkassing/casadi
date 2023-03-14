@@ -204,26 +204,54 @@ namespace casadi {
       casadi_error("Unknown interpolation type: " + interpolation_type);
     }
 
-    // Get or create Jacobians and linear system solvers
-    for (bool backward : {false, true}) {
-      // Skip backward?
-      if (backward && nrx_==0) continue;
+    // If derivative, use Jacobian from non-augmented system if possible
+    SundialsInterface* d = 0;
+    if (ns_ > 0) {
+      d = derivative_of_.get<SundialsInterface>();
+      casadi_assert_dev(d != nullptr);
+    }
 
-      // Get Jacobian function
-      Function J;
-      if (ns_==0) {
-        J = getJ(backward);
+    // Get Jacobian function, forward problem
+    Function jacF;
+    Sparsity jacF_sp;
+    if (d == 0) {
+      jacF = get_jacF(&jacF_sp);
+    } else if (d->ns_ == 0) {
+      jacF = d->get_function("jacF");
+      linsolF_ = d->linsolF_;
+      jacF_sp = linsolF_.sparsity();
+    } else {
+      jacF = d->get_jacF(&jacF_sp);
+    }
+    set_function(jacF, jacF.name(), true);
+    alloc_w(jacF_sp.nnz(), true);  // jacF
+
+    // Linear solver for forward problem
+    if (linsolF_.is_null()) {
+      linsolF_ = Linsol("linsolF", linear_solver_, jacF_sp, linear_solver_options_);
+    }
+
+    // Initialize backward problem
+    if (nrx_ > 0) {
+      // Get Jacobian function, backward problem
+      Function jacB;
+      Sparsity jacB_sp;
+      if (d == 0) {
+        jacB = get_jacB(&jacB_sp);
+      } else if (d->ns_ == 0) {
+        jacB = d->get_function("jacB");
+        linsolB_ = d->linsolB_;
+        jacB_sp = linsolB_.sparsity();
       } else {
-        SundialsInterface* d = derivative_of_.get<SundialsInterface>();
-        casadi_assert_dev(d!=nullptr);
-        if (d->ns_==0) {
-          J = backward ? d->get_function("jacB") : d->get_function("jacF");
-        } else {
-          J = d->getJ(backward);
-        }
+        jacB = d->get_jacB(&jacB_sp);
       }
-      set_function(J, J.name(), true);
-      alloc_w(J.nnz_out(0), true);
+      set_function(jacB, jacB.name(), true);
+      alloc_w(jacB_sp.nnz(), true);  // jacB
+
+      // Linear solver for backward problem
+      if (linsolB_.is_null()) {
+        linsolB_ = Linsol("linsolB", linear_solver_, jacB_sp, linear_solver_options_);
+      }
     }
 
     // Allocate work vectors
@@ -231,13 +259,24 @@ namespace casadi {
     alloc_w(nu_, true); // u
     alloc_w(nrp_, true); // rp
     alloc_w(2 * std::max(nx_+nz_, nrx_+nrz_), true); // v1, v2
+  }
 
-    // Allocate linear solvers
-    linsolF_ = Linsol("linsolF", linear_solver_,
-      get_function("jacF").sparsity_out(0), linear_solver_options_);
+  void SundialsInterface::set_work(void* mem, const double**& arg, double**& res,
+      casadi_int*& iw, double*& w) const {
+    auto m = static_cast<SundialsMemory*>(mem);
+
+    // Set work in base classes
+    Integrator::set_work(mem, arg, res, iw, w);
+
+    // Work vectors
+    m->p = w; w += np_;
+    m->u = w; w += nu_;
+    m->rp = w; w += nrp_;
+    m->v1 = w; w += std::max(nx_+nz_, nrx_+nrz_);
+    m->v2 = w; w += std::max(nx_+nz_, nrx_+nrz_);
+    m->jacF = w; w += linsolF_.sparsity().nnz();
     if (nrx_>0) {
-      linsolB_ = Linsol("linsolB", linear_solver_,
-        get_function("jacB").sparsity_out(0), linear_solver_options_);
+      m->jacB = w; w += linsolB_.sparsity().nnz();
     }
   }
 
@@ -249,7 +288,7 @@ namespace casadi {
     m->xz = N_VNew_Serial(nx_+nz_);
     m->q = N_VNew_Serial(nq_);
     m->rxz = N_VNew_Serial(nrx_+nrz_);
-    m->rq = N_VNew_Serial(nrq_);
+    m->ruq = N_VNew_Serial(nrq_ + nuq_);
 
     m->mem_linsolF = linsolF_.checkout();
     if (!linsolB_.is_null()) m->mem_linsolB = linsolB_.checkout();
@@ -257,12 +296,9 @@ namespace casadi {
     return 0;
   }
 
-  void SundialsInterface::reset(IntegratorMemory* mem, double t, const double* x,
+  void SundialsInterface::reset(IntegratorMemory* mem, const double* x,
       const double* z, const double* p) const {
     auto m = static_cast<SundialsMemory*>(mem);
-
-    // Update time
-    m->t = t;
 
     // Set parameters
     casadi_copy(p, np_, m->p);
@@ -275,12 +311,9 @@ namespace casadi {
     N_VConst(0., m->q);
   }
 
-  void SundialsInterface::resetB(IntegratorMemory* mem, double t,
+  void SundialsInterface::resetB(IntegratorMemory* mem,
       const double* rx, const double* rz, const double* rp) const {
     auto m = static_cast<SundialsMemory*>(mem);
-
-    // Update time
-    m->t = t;
 
     // Set parameters
     casadi_copy(rp, nrp_, m->rp);
@@ -290,7 +323,7 @@ namespace casadi {
     casadi_copy(rz, nrz_, NV_DATA_S(m->rxz) + nrx_);
 
     // Reset summation states
-    N_VConst(0., m->rq);
+    N_VConst(0., m->ruq);
   }
 
   void SundialsInterface::impulseB(IntegratorMemory* mem,
@@ -309,7 +342,7 @@ namespace casadi {
     this->xz  = nullptr;
     this->q = nullptr;
     this->rxz = nullptr;
-    this->rq = nullptr;
+    this->ruq = nullptr;
     this->first_callB = true;
     this->mem_linsolF = -1;
     this->mem_linsolB = -1;
@@ -319,7 +352,7 @@ namespace casadi {
     if (this->xz) N_VDestroy_Serial(this->xz);
     if (this->q) N_VDestroy_Serial(this->q);
     if (this->rxz) N_VDestroy_Serial(this->rxz);
-    if (this->rq) N_VDestroy_Serial(this->rq);
+    if (this->ruq) N_VDestroy_Serial(this->ruq);
   }
 
   Dict SundialsInterface::get_stats(void* mem) const {
@@ -387,25 +420,6 @@ namespace casadi {
       print("Number of nonlinear convergence failures: %ld\n", m->nncfailsB);
     }
     print("\n");
-  }
-
-  void SundialsInterface::set_work(void* mem, const double**& arg, double**& res,
-                                casadi_int*& iw, double*& w) const {
-    auto m = static_cast<SundialsMemory*>(mem);
-
-    // Set work in base classes
-    Integrator::set_work(mem, arg, res, iw, w);
-
-    // Work vectors
-    m->p = w; w += np_;
-    m->u = w; w += nu_;
-    m->rp = w; w += nrp_;
-    m->v1 = w; w += std::max(nx_+nz_, nrx_+nrz_);
-    m->v2 = w; w += std::max(nx_+nz_, nrx_+nrz_);
-    m->jac = w; w += get_function("jacF").nnz_out(0);
-    if (nrx_>0) {
-      m->jacB = w; w += get_function("jacB").nnz_out(0);
-    }
   }
 
   SundialsInterface::SundialsInterface(DeserializingStream& s) : Integrator(s) {

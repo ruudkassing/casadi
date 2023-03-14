@@ -54,8 +54,7 @@ namespace casadi {
      \author Joel Andersson
      \date 2014
   */
-  class CASADI_INTEGRATOR_COLLOCATION_EXPORT Collocation :
-        public ImplicitFixedStepIntegrator {
+  class CASADI_INTEGRATOR_COLLOCATION_EXPORT Collocation : public ImplicitFixedStepIntegrator {
    public:
 
     /// Constructor
@@ -93,12 +92,12 @@ namespace casadi {
     static double zeroIfSmall(double x);
 
     /** \brief Reset the forward problem */
-    void reset(IntegratorMemory* mem, double t, const double* x,
-                       const double* z, const double* p) const override;
+    void reset(IntegratorMemory* mem,
+      const double* x, const double* z, const double* p) const override;
 
     /// Reset the backward problem and take time to tf
-    void resetB(IntegratorMemory* mem, double t, const double* rx,
-                        const double* rz, const double* rp) const override;
+    void resetB(IntegratorMemory* mem,
+      const double* rx, const double* rz, const double* rp) const override;
 
     MX algebraic_state_init(const MX& x0, const MX& z0) const override;
     MX algebraic_state_output(const MX& Z) const override;
@@ -120,7 +119,17 @@ namespace casadi {
 
     /** \brief Deserialize into MX */
     static ProtoFunction* deserialize(DeserializingStream& s) { return new Collocation(s); }
-  protected:
+
+   protected:
+
+    ///@{
+    /** \brief IO conventions for continuous time dynamics */
+    enum DaeIn { DAE_T, DAE_X, DAE_Z, DAE_P, DAE_U, DAE_NUM_IN};
+    enum DaeOut { DAE_ODE, DAE_ALG, DAE_QUAD, DAE_NUM_OUT};
+    enum RDaeIn { RDAE_T, RDAE_X, RDAE_Z, RDAE_P, RDAE_U, RDAE_RX, RDAE_RZ, RDAE_RP, RDAE_NUM_IN};
+    enum RDaeOut { RDAE_RODE, RDAE_RALG, RDAE_RQUAD, RDAE_UQUAD, RDAE_NUM_OUT};
+    ///@}
+
     /** \brief Deserializing constructor */
     explicit Collocation(DeserializingStream& s);
   };

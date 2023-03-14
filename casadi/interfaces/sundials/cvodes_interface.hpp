@@ -125,15 +125,15 @@ namespace casadi {
     void free_mem(void *mem) const override { delete static_cast<CvodesMemory*>(mem);}
 
     /** \brief  Reset the forward problem and bring the time back to t0 */
-    void reset(IntegratorMemory* mem, double t,
+    void reset(IntegratorMemory* mem,
       const double* x, const double* z, const double* p) const override;
 
     /** \brief  Advance solution in time */
-    void advance(IntegratorMemory* mem, double t_next, double t_stop,
+    void advance(IntegratorMemory* mem,
       const double* u, double* x, double* z, double* q) const override;
 
     /** \brief  Reset the backward problem and take time to tf */
-    void resetB(IntegratorMemory* mem, double t,
+    void resetB(IntegratorMemory* mem,
       const double* rx, const double* rz, const double* rp) const override;
 
     /** \brief Introduce an impulse into the backwards integration at the current time */
@@ -141,8 +141,8 @@ namespace casadi {
       const double* rx, const double* rz, const double* rp) const override;
 
     /** \brief  Retreat solution in time */
-    void retreat(IntegratorMemory* mem, double t_next, double t_stop,
-      double* rx, double* rz, double* rq) const override;
+    void retreat(IntegratorMemory* mem, const double* u,
+      double* rx, double* rz, double* rq, double* uq) const override;
 
     /** \brief Cast to memory object */
     static CvodesMemory* to_mem(void *mem) {
@@ -151,11 +151,11 @@ namespace casadi {
       return m;
     }
 
-    ///@{
-    // Get system Jacobian
-    Function getJ(bool backward) const override;
-    template<typename MatType> Function getJ(bool backward) const;
-    ///@}
+    // Get system Jacobian, forward problem
+    Function get_jacF(Sparsity* sp) const override;
+
+    // Get system Jacobian, backward problem
+    Function get_jacB(Sparsity* sp) const override;
 
     /// A documentation string
     static const std::string meta_doc;
@@ -168,7 +168,7 @@ namespace casadi {
                       void *user_data);
     static int rhsQ(double t, N_Vector x, N_Vector qdot, void *user_data);
     static int rhsB(double t, N_Vector x, N_Vector xB, N_Vector xdotB, void *user_data);
-    static int rhsQB(double t, N_Vector x, N_Vector xB, N_Vector qdotB, void *user_data);
+    static int rhsQB(double t, N_Vector x, N_Vector rx, N_Vector ruqdot, void *user_data);
     static int jtimes(N_Vector v, N_Vector Jv, double t, N_Vector x, N_Vector xdot,
                       void *user_data, N_Vector tmp);
     static int jtimesB(N_Vector vB, N_Vector JvB, double t, N_Vector x, N_Vector xB,
