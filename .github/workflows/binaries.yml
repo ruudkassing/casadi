@@ -350,12 +350,14 @@ jobs:
           file: docs/users_guide/users_guide.pdf
           prerelease: true
       - run: git status
-      - uses: EndBug/add-and-commit@v9 # You can change this to use a specific version.
-        with:
-          message: "automated commit by docs target [skip ci]"
-      - run: git commit -a -m "automated commit by docs target [skip ci]"
+      - run: |
+          git stash
+          git pull origin ${{ env.GITHUB_REF_SLUG }}
+          git stash pop
+          git config --local user.email "casaditestbot@gmail.com"
+          git config --local user.name "casadibot"
+          git commit -a -m "automated commit by docs target [skip ci]"
       - name: Push changes
         uses: ad-m/github-push-action@v0.6.0
         with:
           branch: ${{ env.GITHUB_REF_SLUG }}
-            
