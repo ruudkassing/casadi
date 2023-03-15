@@ -347,4 +347,10 @@ jobs:
           tag: nightly-${{ env.GITHUB_REF_SLUG }}
           file: docs/users_guide/users_guide.pdf
           prerelease: true
-          
+      - run: git status
+      - run: git commit -a -m "automated commit by docs target [skip ci]"
+      - name: Push changes
+        uses: ad-m/github-push-action@v0.6.0
+        with:
+          branch: ${{ env.GITHUB_REF_SLUG }}
+            
