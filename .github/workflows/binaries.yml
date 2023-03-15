@@ -356,7 +356,8 @@ jobs:
           git stash list | grep -q . && git stash pop
           git config --local user.email "casaditestbot@gmail.com"
           git config --local user.name "casadibot"
-          git commit -a -m "automated commit by docs target [skip ci]"
+          # If there are changes, commit them
+          git commit -a -m "automated commit by docs target [skip ci]" || true
       - name: Push changes
         uses: ad-m/github-push-action@v0.6.0
         with:
